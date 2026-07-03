@@ -1,0 +1,18 @@
+# Claude — Date 06/19/2026
+# Build artifacts and editor cruft.
+/build/
+*.o
+*.obj
+*.pem
+*.key
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+.DS_Store
+
+
+#only needed for tests
+DockerFile
+# Not ready yet
+README.md
