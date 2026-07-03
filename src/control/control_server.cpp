@@ -1,4 +1,3 @@
-// Claude — Date 06/19/2026
 // Control-plane implementation. Deliberately simple/blocking: this thread is off
 // the data path, so it can afford to block in poll()/read() without hurting
 // throughput. poll() always watches stop_fd_ alongside the real fd so shutdown
