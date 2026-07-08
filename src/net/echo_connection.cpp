@@ -9,17 +9,20 @@
 #include <cerrno>
 #include <cstdint>
 
+#include "net/conn_limit.h"
 #include "net/event_loop.h"
 
 namespace castle {
 
 EchoConnection::EchoConnection(EventLoop& loop, Socket sock)
     : loop_(loop), sock_(std::move(sock)) {
+    active_conn_count().fetch_add(1, std::memory_order_relaxed);  // global cap
     loop_.stats().active_connections.fetch_add(1, std::memory_order_relaxed);
     loop_.stats().total_connections.fetch_add(1, std::memory_order_relaxed);
 }
 
 EchoConnection::~EchoConnection() {
+    active_conn_count().fetch_sub(1, std::memory_order_relaxed);
     loop_.stats().active_connections.fetch_sub(1, std::memory_order_relaxed);
 }
 

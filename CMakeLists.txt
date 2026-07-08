@@ -1,10 +1,7 @@
-# Claude — Date 06/19/2026
-# Build definition for castle++ (the "buffer"). Linux-only by design: the core
-# is an epoll reactor, so this targets the Raspberry Pi / any Linux box. Build
-# on the Pi directly, or via the provided Dockerfile from a Mac.
+# is an epoll reactor, so this targets any x86-64/Linux server. Build on the
+# server directly, or via the provided Dockerfile from a Mac.
 
 cmake_minimum_required(VERSION 3.16)
-# Claude — Date 06/19/2026
 # C is enabled alongside C++ for the vendored picohttpparser (a C source).
 project(castleplusplus LANGUAGES CXX C)
 
@@ -18,9 +15,7 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic)
 
-# Claude — Date 06/19/2026
 # Single binary named `castle`. As milestones land (http/, tls/, supervisor/...)
-# their .cpp files get appended here.
 add_executable(castle
   src/main.cpp
   src/net/socket.cpp
@@ -36,6 +31,7 @@ add_executable(castle
   src/net/transport.cpp
   src/tls/tls_context.cpp
   src/tls/tls_transport.cpp
+  src/gateway/rate_limiter.cpp
   third_party/picohttpparser/picohttpparser.c
 )
 

@@ -352,7 +352,8 @@ static const char *parse_headers(const char *buf, const char *buf_end, struct ph
     return buf;
 }
 
-static const char *parse_request(const char *buf, const char *buf_end, const char **method, size_t *method_len, const char **path,
+static const char *parse_request(const char *buf, const char *buf_end, 
+                                 const char **method, size_t *method_len, const char **path,
                                  size_t *path_len, int *minor_version, struct phr_header *headers, size_t *num_headers,
                                  size_t max_headers, int *ret)
 {
@@ -365,7 +366,7 @@ static const char *parse_request(const char *buf, const char *buf_end, const cha
         ++buf;
     }
 
-    /* parse request line */
+    // parse request line
     if ((buf = parse_token(buf, buf_end, method, method_len, ' ', ret)) == NULL) {
         return NULL;
     }
@@ -412,12 +413,11 @@ int phr_parse_request(const char *buf_start, size_t len, const char **method, si
     *minor_version = -1;
     *num_headers = 0;
 
-    /* if last_len != 0, check if the request is complete (a fast countermeasure
-       againt slowloris */
+    // if last_len != 0, check if the request is complete (a fast countermeasure against slowloris
     if (last_len != 0 && is_complete(buf, buf_end, last_len, &r) == NULL) {
         return r;
     }
-
+ 
     if ((buf = parse_request(buf, buf_end, method, method_len, path, path_len, minor_version, headers, num_headers, max_headers,
                              &r)) == NULL) {
         return r;

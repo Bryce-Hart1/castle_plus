@@ -1,12 +1,19 @@
+# Claude — Date 06/19/2026 last changed: 07/05/2026 by: Claude
 # Runs castle++ under systemd: systemd supervises the buffer, and the buffer
 # supervises the app backends. Because the backends are children in this unit's
 # cgroup, systemd's default KillMode=control-group cleans them all up if castle
 # itself is stopped or crashes. Logs (ours + the backends') go to journald.
 #
-# Install (adjust paths):
-#   sudo cp castle /opt/castle/ && sudo cp -r config /opt/castle/
+# Runs as a dedicated non-root user on a high port (the VPS/WireGuard ingress
+# forwards public :443 -> here), so castle never needs root. Install:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin castle
+#   sudo mkdir -p /opt/castle && sudo cp castle /opt/castle/ \
+#     && sudo cp -r config /opt/castle/
+#   sudo chown -R castle:castle /opt/castle
 #   sudo cp systemd/castle.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now castle
+# TLS certs: put them where 'castle' can read them (e.g. /opt/castle/tls, owned
+# by castle) and append --tls-cert/--tls-key to ExecStart (see vps/README.md).
 [Unit]
 Description=castle++ buffer (reverse proxy + process supervisor)
 After=network-online.target
@@ -14,18 +21,36 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=castle
+Group=castle
 WorkingDirectory=/opt/castle
-ExecStart=/opt/castle/castle --port 8080 --services /opt/castle/config/services.conf
+
+# systemd creates + owns these for the castle user each start:
+#   /run/castle      -> the control socket           (RuntimeDirectory)
+#   /var/log/castle  -> the file log                 (LogsDirectory)
+RuntimeDirectory=castle
+LogsDirectory=castle
+
+# High port (VPS forwards 443 -> 8443). Add --tls-cert/--tls-key once issued.
+ExecStart=/opt/castle/castle --port 8443 \
+    --routes   /opt/castle/config/routes.conf \
+    --services /opt/castle/config/services.conf \
+    --control  /run/castle/castle.sock \
+    --log-file /var/log/castle/castle.log \
+    --max-conn 2000 --rate 50
+
+# `systemctl reload castle` -> SIGHUP -> live TLS cert reload (Let's Encrypt
+# renewals), no restart / no dropped connections. Point acme.sh/certbot's
+# deploy hook at `systemctl reload castle`.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
 
-# Least privilege. Uncomment and create a 'castle' user for production; add
-# CAP_NET_BIND_SERVICE only if castle must bind a port < 1024 directly (with the
-# VPS/WireGuard ingress it can listen on a high port instead).
-# User=castle
-# Group=castle
+# Least privilege. To bind a port < 1024 directly instead of via the VPS,
+# uncomment the capability line below (and lower --port to 443).
 # AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

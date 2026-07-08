@@ -14,6 +14,7 @@
 namespace castle {
 
 class EventLoop;
+class RateLimiter;
 
 class Listener : public EventHandler {
 public:
@@ -22,7 +23,10 @@ public:
     using ConnFactory =
         std::function<std::unique_ptr<EventHandler>(EventLoop&, Socket)>;
 
-    Listener(EventLoop& loop, Socket sock, ConnFactory factory);
+    // `limiter` is optional (may be null); when present, connections over the
+    // per-IP token-bucket rate are dropped at accept.
+    Listener(EventLoop& loop, Socket sock, ConnFactory factory,
+             RateLimiter* limiter = nullptr);
 
     int fd() const override { return sock_.get(); }
     void on_readable() override;
@@ -32,6 +36,7 @@ private:
     EventLoop& loop_;
     Socket sock_;
     ConnFactory factory_;
+    RateLimiter* limiter_;
 };
 
 }  // namespace castle

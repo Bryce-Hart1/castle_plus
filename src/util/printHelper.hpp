@@ -1,11 +1,10 @@
 /**
- * Jun 30 Bryce Hart
  * welcome to
                _   _                  
-  ___ __ _ ___| |_| | ___   _     _   
- / __/ _` / __| __| |/ _ \_| |_ _| |_ 
-| (_| (_| \__ \ |_| |  __/_   _|_   _|
- \___\__,_|___/\__|_|\___| |_|   |_| 
+  ___ __ _ ___| |_| | ___   _   
+ / __/ _` / __| __| |/ _ \_| |_ 
+| (_| (_| \__ \ |_| |  __/_   _|
+ \___\__,_|___/\__|_|\___| |_|  
  * an open source project by Bryce Hart 
  * 
  * 
@@ -53,19 +52,17 @@ void printViewWithBrickBorder(const std::string_view view, const bool alternate)
 
 void printLogo(){
     const std::array<std::string_view, 5> castleLogo = {
-"               _   _                   ",
-"  ___ __ _ ___| |_| | ___   _     _    ",
-R"( / __/ _` / __| __| |/ _ \_| |_ _| |_  )",
-R"(| (_| (_| \__ \ |_| |  __/_   _|_   _| )",
-R"( \___\__,_|___/\__|_|\___| |_|   |_|   )",
+  "               _   _              ",
+  "  ___ __ _ ___| |_| | ___   _     ",
+R"( / __/ _` / __| __| |/ _ \_| |_   )",
+R"(| (_| (_| \__ \ |_| |  __/_   _| )",
+R"( \___\__,_|___/\__|_|\___| |_|   )",
     };
     bool flip = false;
     detail::printBrick(!flip);
     for(const std::string_view &line : castleLogo){
         detail::printViewWithBrickBorder(line, flip);
-        if(flip){
             flip = !flip;
-        }
     }
     detail::printBrick(flip);
 

@@ -46,6 +46,7 @@ private:
     std::string dispatch(const std::string& line, bool& close_session);
     std::string cmd_status() const;
     std::string cmd_health();
+    std::string cmd_errors();  // new log lines since the last pull
 
     std::string socket_path_;
     std::vector<EventLoop*> loops_;

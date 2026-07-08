@@ -1,5 +1,8 @@
-// Claude — Date 06/19/2026
+// Claude — Date 06/19/2026 last changed: 07/04/2026 by: Claude
 // Client-side proxy implementation, transport-agnostic (plaintext or TLS).
+// Request bodies are streamed to the backend as they arrive (no whole-body
+// buffering), with backpressure in both directions so large uploads/downloads
+// stay bounded-memory.
 #include "http/http_connection.h"
 
 #include <arpa/inet.h>
@@ -8,6 +11,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
@@ -16,6 +20,7 @@
 #include <cstring>
 
 #include "http/backend_connection.h"
+#include "net/conn_limit.h"
 #include "net/event_loop.h"
 #include "net/socket.h"
 #include "third_party/picohttpparser/picohttpparser.h"
@@ -25,8 +30,7 @@ namespace castle {
 
 namespace {
 
-constexpr size_t kMaxHead = 32 * 1024;         // request head cap  -> 431
-constexpr size_t kMaxBody = 8 * 1024 * 1024;   // request body cap  -> 413
+constexpr size_t kMaxHead = 32 * 1024;  // request head cap -> 431
 constexpr size_t kMaxHeaders = 100;
 
 bool iequals(const char* a, size_t alen, const char* b) {
@@ -53,19 +57,22 @@ bool is_hop_by_hop(const char* name, size_t len) {
 HttpConnection::HttpConnection(EventLoop& loop,
                                std::unique_ptr<Transport> transport,
                                const Router& router,
-                               std::chrono::seconds timeout)
+                               std::chrono::seconds timeout, size_t max_body)
     : loop_(loop),
       transport_(std::move(transport)),
       router_(router),
       timeout_(timeout),
+      max_body_(max_body),
       last_activity_(std::chrono::steady_clock::now()),
       interest_(EPOLLIN | EPOLLET) {  // matches how the listener registered us
+    active_conn_count().fetch_add(1, std::memory_order_relaxed);  // global cap
     loop_.stats().active_connections.fetch_add(1, std::memory_order_relaxed);
     loop_.stats().total_connections.fetch_add(1, std::memory_order_relaxed);
 }
 
 HttpConnection::~HttpConnection() {
     if (backend_) backend_->detach_client();
+    active_conn_count().fetch_sub(1, std::memory_order_relaxed);
     loop_.stats().active_connections.fetch_sub(1, std::memory_order_relaxed);
 }
 
@@ -102,19 +109,15 @@ void HttpConnection::drive() {
 IoStatus HttpConnection::pump_read() {
     char buf[16384];
     for (;;) {
+        if (read_paused_) return IoStatus::WouldBlockRead;  // upload backpressure
         size_t got = 0;
         IoStatus st = transport_->recv(buf, sizeof(buf), got);
         if (st == IoStatus::Ok) {
             touch();
-            if (state_ == State::ReadingHead || state_ == State::ReadingBody) {
-                in_.append(buf, got);
-                loop_.stats().bytes_in.fetch_add(static_cast<uint64_t>(got),
-                                                 std::memory_order_relaxed);
-                if (state_ == State::ReadingHead) process_head();
-                if (state_ == State::ReadingBody) maybe_start_backend();
-                if (closed_) return IoStatus::Closed;
-            }
-            // Streaming/Closing: discard any extra client bytes (no pipelining).
+            loop_.stats().bytes_in.fetch_add(static_cast<uint64_t>(got),
+                                             std::memory_order_relaxed);
+            handle_client_bytes(buf, got);
+            if (closed_) return IoStatus::Closed;
             continue;
         }
         if (st == IoStatus::Closed || st == IoStatus::Error) {
@@ -122,6 +125,22 @@ IoStatus HttpConnection::pump_read() {
             return st;
         }
         return st;  // WouldBlockRead / WouldBlockWrite
+    }
+}
+
+void HttpConnection::handle_client_bytes(const char* data, size_t n) {
+    switch (state_) {
+        case State::ReadingHead:
+            in_.append(data, n);
+            process_head();
+            break;
+        case State::StreamingUp:
+            forward_body(data, n);
+            break;
+        case State::Streaming:
+        case State::Closing:
+            // No pipelining: extra client bytes after the request are ignored.
+            break;
     }
 }
 
@@ -142,6 +161,13 @@ IoStatus HttpConnection::pump_write() {
         }
         return st;  // WouldBlock*
     }
+
+    // Response drained: if we'd paused the backend (download backpressure),
+    // let it resume reading.
+    if (backend_paused_ && backend_) {
+        backend_paused_ = false;
+        backend_->resume_reads();
+    }
     if (state_ == State::Closing) {
         close_both();
         return IoStatus::Ok;
@@ -152,12 +178,14 @@ IoStatus HttpConnection::pump_write() {
 void HttpConnection::recompute_interest() {
     bool want_in = false, want_out = false;
 
-    // Read side: keep reading (more request data, or to notice the client
-    // hanging up) unless the read is specifically blocked wanting to write.
-    if (read_block_ == IoStatus::WouldBlockWrite)
-        want_out = true;
-    else
-        want_in = true;
+    // Read side: keep reading (more request data / notice client close) unless
+    // we're paused for upload backpressure, or the read wants to write (TLS).
+    if (!read_paused_) {
+        if (read_block_ == IoStatus::WouldBlockWrite)
+            want_out = true;
+        else
+            want_in = true;
+    }
 
     // Write side: only relevant while response bytes are still buffered.
     if (!out_.empty()) {
@@ -170,7 +198,9 @@ void HttpConnection::recompute_interest() {
     uint32_t ev = EPOLLET;
     if (want_in) ev |= EPOLLIN;
     if (want_out) ev |= EPOLLOUT;
-    if (!(ev & (EPOLLIN | EPOLLOUT))) ev |= EPOLLIN;  // safety net
+    // Watch for readable by default — but not while deliberately paused (then we
+    // go quiet until the backend drains; EPOLLHUP still fires regardless).
+    if (!want_in && !want_out && !read_paused_) ev |= EPOLLIN;
     set_interest(ev);
 }
 
@@ -181,7 +211,8 @@ void HttpConnection::set_interest(uint32_t events) {
 }
 
 // ---------------------------------------------------------------------------
-// Request parsing / routing (unchanged from the plaintext version).
+// Request head: parse, route, open the backend, and send the head. The body is
+// then streamed by forward_body() as it arrives.
 // ---------------------------------------------------------------------------
 void HttpConnection::process_head() {
     const char* method;
@@ -239,7 +270,11 @@ void HttpConnection::process_head() {
         send_error(501, "Not Implemented", "chunked request body unsupported");
         return;
     }
-    if (content_length < 0 || static_cast<size_t>(content_length) > kMaxBody) {
+    if (content_length < 0) {
+        send_error(400, "Bad Request", "invalid content-length");
+        return;
+    }
+    if (max_body_ != 0 && static_cast<size_t>(content_length) > max_body_) {
         send_error(413, "Payload Too Large", "request body too large");
         return;
     }
@@ -252,14 +287,35 @@ void HttpConnection::process_head() {
 
     upstream_ = std::move(head);
     backend_target_ = *backend;
-    body_needed_ = static_cast<size_t>(content_length);
-    state_ = State::ReadingBody;
+    body_remaining_ = static_cast<size_t>(content_length);
+
+    start_backend();  // sends the head; leaves state_ == ReadingHead on success
+    if (state_ == State::Closing || closed_) return;  // backend failed -> error
+
+    if (body_remaining_ == 0) {
+        state_ = State::Streaming;  // no body; just await the response
+    } else {
+        state_ = State::StreamingUp;
+        // Forward any body bytes that arrived in the same read as the head.
+        size_t buffered = in_.size() - head_len_;
+        if (buffered > 0) forward_body(in_.data() + head_len_, buffered);
+    }
+    in_.clear();
+    in_.shrink_to_fit();
 }
 
-void HttpConnection::maybe_start_backend() {
-    if (in_.size() < head_len_ + body_needed_) return;  // need more body bytes
-    upstream_.append(in_.data() + head_len_, body_needed_);
-    start_backend();
+void HttpConnection::forward_body(const char* data, size_t n) {
+    if (!backend_) return;
+    size_t take = std::min(n, body_remaining_);
+    if (take > 0) {
+        backend_->send(data, take);
+        body_remaining_ -= take;
+    }
+    if (body_remaining_ == 0) {
+        state_ = State::Streaming;  // request fully forwarded
+    } else if (backend_->pending_bytes() > kBackpressureHigh) {
+        read_paused_ = true;  // upload backpressure: stop reading the client body
+    }
 }
 
 void HttpConnection::start_backend() {
@@ -287,9 +343,8 @@ void HttpConnection::start_backend() {
     auto bc =
         std::make_unique<BackendConnection>(loop_, Socket(fd), this, timeout_);
     backend_ = bc.get();
-    backend_->send(upstream_);  // queued; flushed when the connect completes
+    backend_->send(upstream_);  // head; queued, flushed when the connect completes
     loop_.add(std::move(bc), EPOLLOUT | EPOLLET);  // EPOLLOUT = connect done
-    state_ = State::Streaming;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +356,19 @@ void HttpConnection::deliver_to_client(const char* data, size_t n) {
     out_.append(data, n);
     write_block_ = pump_write();
     if (closed_) return;
+    // Download backpressure: if the client is slow and the response is piling
+    // up, pause reading from the backend until we drain.
+    if (backend_ && !backend_paused_ && out_.size() > kBackpressureHigh) {
+        backend_->pause_reads();
+        backend_paused_ = true;
+    }
     recompute_interest();
+}
+
+void HttpConnection::on_backend_drained() {
+    if (closed_ || !read_paused_) return;
+    read_paused_ = false;  // upload backpressure released
+    drive();               // resume reading the request body
 }
 
 void HttpConnection::on_backend_closed() {

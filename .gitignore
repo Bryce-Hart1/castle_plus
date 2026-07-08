@@ -1,4 +1,3 @@
-# Claude — Date 06/19/2026
 # Build artifacts and editor cruft.
 /build/
 *.o
@@ -11,7 +10,8 @@ compile_commands.json
 .idea/
 .DS_Store
 
-
+#not public yet
+vps
 #only needed for tests
 DockerFile
 # Not ready yet

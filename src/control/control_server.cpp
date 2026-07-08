@@ -6,7 +6,7 @@
 #include "util/autocorrect.hpp"
 
 #include <poll.h>
-#include <sys/eventfd.h> //only runs in docker/pi
+#include <sys/eventfd.h> // Linux-only (runs in docker / on the server)
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "net/event_loop.h"
 #include "supervisor/supervisor.h"
@@ -222,12 +223,14 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
                "  health          probe every loop via the async round-trip\n"
                "  services        list supervised backends\n"
                "  restart <name>  restart a supervised backend\n"
+               "  errors          log lines since the last pull (needs --log-file)\n"
                "  shutdown        gracefully stop castle++\n"
                "  exit            close this admin session\n";
     }
     if (cmd == "ping") return "pong\n";
     if (cmd == "status" || cmd == "stats") return cmd_status();
     if (cmd == "health") return cmd_health();
+    if (cmd == "errors") return cmd_errors();
     if (cmd == "services" || cmd == "backends") {
         return supervisor_ ? supervisor_->describe_services()
                            : "no supervisor configured\n";
@@ -248,6 +251,18 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
         return "bye\n";
     }
     return "unknown command: " + cmd + " (try 'help')\n";
+}
+
+std::string ControlServer::cmd_errors() {
+    // First call returns the whole log; each later call returns only what's new.
+    std::vector<std::string> lines = castle::log_pull_new();
+    if (lines.empty()) return "no new log entries since last pull\n";
+    std::string out;
+    for (const auto& l : lines) {
+        out += l;
+        out += '\n';
+    }
+    return out;
 }
 
 std::string ControlServer::cmd_status() const {

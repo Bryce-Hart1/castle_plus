@@ -6,17 +6,24 @@
 #include <netinet/in.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
 
+#include "gateway/rate_limiter.h"
+#include "net/conn_limit.h"
 #include "net/event_loop.h"
 #include "util/log.h"
 
 namespace castle {
 
-Listener::Listener(EventLoop& loop, Socket sock, ConnFactory factory)
-    : loop_(loop), sock_(std::move(sock)), factory_(std::move(factory)) {}
+Listener::Listener(EventLoop& loop, Socket sock, ConnFactory factory,
+                   RateLimiter* limiter)
+    : loop_(loop),
+      sock_(std::move(sock)),
+      factory_(std::move(factory)),
+      limiter_(limiter) {}
 
 void Listener::on_readable() {
     for (;;) {
@@ -37,6 +44,17 @@ void Listener::on_readable() {
             LOG_ERROR("accept4 failed: %s", std::strerror(errno));
             break;
         }
+        // Drop early (before any TLS/HTTP work) if this client is over its
+        // rate, or if we're at the global connection cap.
+        if (limiter_ && !limiter_->allow(addr.sin_addr.s_addr)) {
+            ::close(cfd);
+            continue;
+        }
+        if (!conn_slot_available()) {
+            ::close(cfd);
+            continue;
+        }
+
         // factory may return null (e.g. a TLS wrap failure); it already closed
         // the socket in that case, so just skip.
         auto conn = factory_(loop_, Socket(cfd));

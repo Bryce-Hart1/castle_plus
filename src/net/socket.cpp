@@ -1,6 +1,6 @@
 // Claude — Date 06/19/2026
 // Socket helper implementations. Linux-specific (SO_REUSEPORT, accept4 etc. are
-// used elsewhere); this whole project targets the Pi / Linux.
+// used elsewhere); this whole project targets Linux (x86-64).
 #include "net/socket.h"
 
 #include <arpa/inet.h>
@@ -40,7 +40,6 @@ Socket make_reuseport_listener(uint16_t port, int backlog, std::string& err) {
         err = std::string("SO_REUSEADDR: ") + std::strerror(errno);
         return Socket{};
     }
-    // Claude — Date 06/19/2026
     // The key option: lets every worker thread bind the same port so the kernel
     // hashes new connections across the listeners.
     if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0) {

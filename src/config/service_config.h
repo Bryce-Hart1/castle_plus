@@ -2,7 +2,7 @@
 // Parsed manifest entry for one supervised backend, plus a tiny dependency-free
 // INI-style parser. Kept zero-dependency on purpose: config parsing isn't the
 // interesting/risky part, and a small parser avoids dragging a TOML/JSON library
-// onto the Pi. The struct is the seam — swap the parser later without touching
+// onto the server. The struct is the seam — swap the parser later without touching
 // the supervisor.
 #pragma once
 
@@ -43,7 +43,6 @@ struct ServiceConfig {
 //   health_interval = 5
 //   backoff_min = 1
 //   backoff_max = 30
-bool parse_services_file(const std::string& path,
-                         std::vector<ServiceConfig>& out, std::string& err);
+bool parse_services_file(const std::string& path,std::vector<ServiceConfig>& out, std::string& err);
 
 }  // namespace castle

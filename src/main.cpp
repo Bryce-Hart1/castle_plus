@@ -20,8 +20,10 @@
 
 #include "config/service_config.h"
 #include "control/control_server.h"
+#include "gateway/rate_limiter.h"
 #include "http/http_connection.h"
 #include "http/router.h"
+#include "net/conn_limit.h"
 #include "net/echo_connection.h"
 #include "net/event_loop.h"
 #include "net/listener.h"
@@ -43,6 +45,11 @@ struct Options {
     int timeout_sec = 30;       // idle connection timeout; 0 disables
     std::string tls_cert;       // PEM cert; with tls_key => HTTPS (proxy only)
     std::string tls_key;        // PEM private key
+    size_t max_body = 1024ull * 1024 * 1024;  // request body cap (0 = unlimited)
+    std::string log_file;  // WARN/ERROR mirrored here; empty = stderr only
+    size_t max_conn = 0;   // max concurrent client connections (0 = unlimited)
+    long rate = 0;         // per-IP connections/sec (0 = rate limiting off)
+    long rate_burst = 0;   // token bucket size (0 => defaults to `rate`)
 };
 
 void print_usage(const char* prog) {
@@ -58,7 +65,15 @@ void print_usage(const char* prog) {
                  "  --timeout N     idle connection timeout, seconds "
                  "(default 30; 0 disables)\n"
                  "  --tls-cert PATH PEM certificate  (with --tls-key => HTTPS)\n"
-                 "  --tls-key PATH  PEM private key\n",
+                 "  --tls-key PATH  PEM private key\n"
+                 "  --max-body N    max request body bytes (default 1 GiB; "
+                 "0 = unlimited)\n"
+                 "  --log-file PATH mirror WARN/ERROR to this file (retrievable "
+                 "later)\n"
+                 "  --max-conn N    max concurrent connections (0 = unlimited)\n"
+                 "  --rate N        per-IP connections/sec, token bucket "
+                 "(0 = off)\n"
+                 "  --rate-burst N  token bucket size (default = --rate)\n",
                  prog);
 }
 
@@ -88,6 +103,17 @@ bool parse_args(int argc, char** argv, Options& opts) {
             opts.routes_path = argv[++i];
         } else if (arg == "--timeout" && next(val) && val >= 0) {
             opts.timeout_sec = static_cast<int>(val);
+        } else if (arg == "--max-body" && next(val) && val >= 0) {
+            opts.max_body = static_cast<size_t>(val);
+        } else if (arg == "--log-file") {
+            if (i + 1 >= argc) return false;
+            opts.log_file = argv[++i];
+        } else if (arg == "--max-conn" && next(val) && val >= 0) {
+            opts.max_conn = static_cast<size_t>(val);
+        } else if (arg == "--rate" && next(val) && val >= 0) {
+            opts.rate = val;
+        } else if (arg == "--rate-burst" && next(val) && val >= 0) {
+            opts.rate_burst = val;
         } else if (arg == "--tls-cert") {
             if (i + 1 >= argc) return false;
             opts.tls_cert = argv[++i];
@@ -124,23 +150,37 @@ int main(int argc, char** argv) {
 
     unsigned n_threads = opts.threads ? opts.threads : std::max(1u, std::thread::hardware_concurrency());
 
+    // Bring up file logging first, so even early startup errors are captured.
+    castle::log_init(opts.log_file);
+
+    // Public-facing hardening: cap concurrent connections, and (optionally) a
+    // per-IP token-bucket rate limiter shared by all listeners.
+    castle::max_conn_limit() = opts.max_conn;
+    std::unique_ptr<castle::RateLimiter> limiter;
+    if (opts.rate > 0) {
+        double burst = opts.rate_burst > 0 ? opts.rate_burst : opts.rate;
+        limiter = std::make_unique<castle::RateLimiter>(
+            static_cast<double>(opts.rate), burst);
+    }
+
     // Writing to a socket whose peer has gone away must yield EPIPE, not a
     // process-killing signal.
     ::signal(SIGPIPE, SIG_IGN);
 
-    // Block SIGINT/SIGTERM/SIGCHLD in this (and therefore every spawned) thread.
-    // SIGINT/SIGTERM are consumed by the sigwait below; SIGCHLD is consumed by
-    // the supervisor's signalfd. Blocking everywhere keeps both off the default
-    // disposition and away from racy async handlers.
+    // Block SIGINT/SIGTERM/SIGHUP/SIGCHLD in this (and every spawned) thread.
+    // SIGINT/SIGTERM/SIGHUP are consumed by the sigwait below; SIGCHLD by the
+    // supervisor's signalfd. Blocking SIGHUP also stops its default action
+    // (terminate) — so a stray `kill -HUP` reloads instead of killing us.
     sigset_t block_mask;
     sigemptyset(&block_mask);
     sigaddset(&block_mask, SIGINT);
     sigaddset(&block_mask, SIGTERM);
+    sigaddset(&block_mask, SIGHUP);
     sigaddset(&block_mask, SIGCHLD);
     pthread_sigmask(SIG_BLOCK, &block_mask, nullptr);
 
     // Choose what the listeners speak: HTTP reverse proxy when routes are given,
-    // otherwise the M1 echo server. `router` is immutable after load(), so every
+    // otherwise the echo server. `router` is immutable after load(), so every
     // loop shares it by const reference with no locking; it must outlive the
     // workers, so it lives here in main.
     castle::Router router;
@@ -169,23 +209,24 @@ int main(int argc, char** argv) {
         }
 
         auto timeout = std::chrono::seconds(opts.timeout_sec);
+        size_t max_body = opts.max_body;
         if (tls_enabled) {
-            factory = [&router, &tlsctx, timeout](castle::EventLoop& loop,
-                                                  castle::Socket sock) {
+            factory = [&router, &tlsctx, timeout, max_body](
+                          castle::EventLoop& loop, castle::Socket sock) {
                 std::unique_ptr<castle::HttpConnection> conn;
                 auto transport = tlsctx.wrap(std::move(sock));  // TLS-wrap the fd
                 if (transport)
                     conn = std::make_unique<castle::HttpConnection>(
-                        loop, std::move(transport), router, timeout);
+                        loop, std::move(transport), router, timeout, max_body);
                 return conn;  // null on rare SSL_new failure -> listener skips
             };
         } else {
-            factory = [&router, timeout](castle::EventLoop& loop,
-                                         castle::Socket sock) {
+            factory = [&router, timeout, max_body](castle::EventLoop& loop,
+                                                   castle::Socket sock) {
                 return std::make_unique<castle::HttpConnection>(
                     loop,
                     std::make_unique<castle::PlainTransport>(std::move(sock)),
-                    router, timeout);
+                    router, timeout, max_body);
             };
         }
     } else {
@@ -209,7 +250,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        loop->add(std::make_unique<castle::Listener>(*loop, std::move(lsock), factory), EPOLLIN | EPOLLET);
+        loop->add(std::make_unique<castle::Listener>(*loop, std::move(lsock), factory, limiter.get()), EPOLLIN | EPOLLET);
         if (opts.timeout_sec > 0) loop->enable_idle_timeouts(1000);  // sweep 1/s
         loops.push_back(std::move(loop));
     }
@@ -263,13 +304,32 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Park until someone asks us to quit (Ctrl-C, SIGTERM, or `shutdown`).
+    // Park until someone asks us to quit (Ctrl-C, SIGTERM, `shutdown`) or to
+    // reload the TLS cert (SIGHUP / `systemctl reload`). SIGHUP loops; the
+    // others fall through to shutdown.
     sigset_t wait_mask;
     sigemptyset(&wait_mask);
     sigaddset(&wait_mask, SIGINT);
     sigaddset(&wait_mask, SIGTERM);
+    sigaddset(&wait_mask, SIGHUP);
     int sig = 0;
-    sigwait(&wait_mask, &sig);
+    for (;;) {
+        sigwait(&wait_mask, &sig);
+        if (sig == SIGHUP) {
+            if (tls_enabled) {
+                std::string terr;
+                if (tlsctx.reload(terr))
+                    LOG_INFO("SIGHUP: reloaded TLS certificate");
+                else
+                    LOG_ERROR("SIGHUP: cert reload failed (keeping current): %s",
+                              terr.c_str());
+            } else {
+                LOG_INFO("SIGHUP: no TLS cert configured; nothing to reload");
+            }
+            continue;
+        }
+        break;  // SIGINT / SIGTERM
+    }
     LOG_INFO("received signal %d, shutting down...", sig);
 
     // Order: stop admin (no command races teardown), stop the supervisor (it
