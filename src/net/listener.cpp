@@ -1,6 +1,8 @@
-// Claude — Date 06/19/2026
+// Claude — Date 06/19/2026 last changed: 07/05/2026 by: Claude
 // Edge-triggered accept loop: drain the accept queue to EAGAIN every wakeup,
 // because epoll won't re-notify until a new connection arrives after we stop.
+// Excess connections (over the per-IP rate or the global cap) are dropped here,
+// at accept, before any TLS/HTTP work is spent on them.
 #include "net/listener.h"
 
 #include <netinet/in.h>
@@ -44,6 +46,7 @@ void Listener::on_readable() {
             LOG_ERROR("accept4 failed: %s", std::strerror(errno));
             break;
         }
+
         // Drop early (before any TLS/HTTP work) if this client is over its
         // rate, or if we're at the global connection cap.
         if (limiter_ && !limiter_->allow(addr.sin_addr.s_addr)) {
