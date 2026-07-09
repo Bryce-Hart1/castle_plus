@@ -52,9 +52,9 @@ void printViewWithBrickBorder(const std::string_view view, const bool alternate)
 
 void printLogo(){
     const std::array<std::string_view, 5> castleLogo = {
-  "               _   _              ",
-  "  ___ __ _ ___| |_| | ___   _     ",
-R"( / __/ _` / __| __| |/ _ \_| |_   )",
+  "                _   _              ",
+  "   ___ __ _ ___| |_| | ___   _     ",
+R"(  / __/ _` / __| __| |/ _ \_| |_   )",
 R"(| (_| (_| \__ \ |_| |  __/_   _| )",
 R"( \___\__,_|___/\__|_|\___| |_|   )",
     };

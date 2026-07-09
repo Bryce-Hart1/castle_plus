@@ -9,6 +9,7 @@
 #include <cctype>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #pragma once
 
 namespace bstd{

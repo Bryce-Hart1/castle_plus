@@ -244,11 +244,26 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
     }
     if (cmd == "shutdown") {
         if (on_shutdown_) on_shutdown_();
-        return "shutting down castle++...\n";
+        return "shutting down castle+...\n";
     }
     if (cmd == "exit" || cmd == "quit") {
         close_session = true;
         return "bye\n";
+    }
+    // bryce hart 7-1-26
+    // Nothing above matched, so cmd is unknown: offer the closest real command
+    // via the autocorrect filter. Reaching here IS the membership check — every
+    // valid command/alias returns earlier — so no separate command list is
+    // needed. The dictionary mirrors the commands (and aliases) handled above;
+    // its string_views point at string literals, so they outlive this call, and
+    // the filter is built once (static) rather than per dispatch.
+    static const bstd::autoCorrectFilter filter(3, {
+        "help", "ping", "status", "stats", "health", "errors",
+        "services", "backends", "restart", "shutdown", "exit", "quit"});
+    const std::string suggestion = filter.fix(cmd);
+    if (suggestion != cmd) {
+        return "unknown command: " + cmd + " — did you mean '" + suggestion +
+               "'?\n";
     }
     return "unknown command: " + cmd + " (try 'help')\n";
 }
