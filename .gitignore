@@ -12,7 +12,6 @@ compile_commands.json
 
 #not public yet
 vps
-#only needed for tests
-DockerFile
-# Not ready yet
-README.md
+
+#claude help only 
+notes.md
