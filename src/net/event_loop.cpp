@@ -1,8 +1,11 @@
-// Claude — Date 06/19/2026
-// The heart of the reactor. Edge-triggered epoll: handlers MUST drain their fd
-// to EAGAIN, because epoll only re-notifies on a new edge. Handler destruction
-// is deferred (process_pending_close) so a callback can safely ask to close its
-// own fd mid-dispatch.
+// Jul 16 Bryce Hart
+/**  The heart of the reactor. 
+* Edge-triggered epoll: handlers MUST drain their fd
+* to EAGAIN, because epoll only re-notifies on a new edge. 
+* Handler destruction
+* is deferred (process_pending_close) so a callback can safely ask to close its
+* own fd mid-dispatch.
+*/
 #include "net/event_loop.h"
 
 #include <sys/epoll.h>
@@ -23,7 +26,7 @@ namespace castle {
 
 EventLoop::EventLoop() {
     epoll_fd_ = ::epoll_create1(EPOLL_CLOEXEC);
-    if (epoll_fd_ < 0) {
+    if (epoll_fd_ < 0){
         LOG_ERROR("epoll_create1 failed: %s", std::strerror(errno));
         return;
     }
@@ -31,21 +34,23 @@ EventLoop::EventLoop() {
     // eventfd registered with data.ptr == nullptr is our cross-thread doorbell:
     // stop() (and future task hand-off) writes it to break epoll_wait.
     wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (wake_fd_ < 0) {
+    if(wake_fd_ < 0){
         LOG_ERROR("eventfd failed: %s", std::strerror(errno));
         return;
     }
+
     epoll_event ev{};
     ev.events = EPOLLIN;  // level-triggered is fine for the doorbell
     ev.data.ptr = nullptr;
-    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &ev) < 0) {
+
+    if(::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &ev) < 0){
         LOG_ERROR("epoll_ctl(wake_fd) failed: %s", std::strerror(errno));
     }
 }
 
 EventLoop::~EventLoop() {
-    if (wake_fd_ >= 0) ::close(wake_fd_);
-    if (epoll_fd_ >= 0) ::close(epoll_fd_);
+    if(wake_fd_ >= 0) ::close(wake_fd_);
+    if(epoll_fd_ >= 0) ::close(epoll_fd_);
 }
 
 void EventLoop::add(std::unique_ptr<EventHandler> handler, uint32_t events) {
@@ -53,16 +58,19 @@ void EventLoop::add(std::unique_ptr<EventHandler> handler, uint32_t events) {
     epoll_event ev{};
     ev.events = events;
     ev.data.ptr = handler.get();
-    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
+    if(::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0){
         LOG_ERROR("epoll_ctl(ADD fd=%d) failed: %s", fd, std::strerror(errno));
         return;  // handler unique_ptr drops here -> fd closed
     }
+
     handlers_[fd] = std::move(handler);
 }
 
 void EventLoop::update(int fd, uint32_t events) {
     auto it = handlers_.find(fd);
-    if (it == handlers_.end()) return;
+    if(it == handlers_.end()){
+        return;
+    }
     epoll_event ev{};
     ev.events = events;
     ev.data.ptr = it->second.get();
@@ -78,30 +86,32 @@ void EventLoop::post(std::function<void()> task) {
         std::lock_guard<std::mutex> lock(task_mutex_);
         tasks_.push_back(std::move(task));
     }
-    // Ring the doorbell so the loop wakes and drains the queue promptly.
+    //wakes up loop to make sure queue drains properly 
     uint64_t one = 1;
     ssize_t r = ::write(wake_fd_, &one, sizeof(one));
     (void)r;
 }
 
-void EventLoop::enable_idle_timeouts(int sweep_interval_ms) {
+void EventLoop::enable_idle_timeouts(int sweep_interval_ms){
     timeout_fd_ = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+
     if (timeout_fd_ < 0) {
-        LOG_ERROR("enable_idle_timeouts: timerfd_create: %s",
-                  std::strerror(errno));
+        LOG_ERROR("enable_idle_timeouts: timerfd_create: %s", std::strerror(errno));
         return;
     }
+
     itimerspec its{};
     its.it_interval.tv_sec = sweep_interval_ms / 1000;
     its.it_interval.tv_nsec = (sweep_interval_ms % 1000) * 1000000L;
     its.it_value = its.it_interval;
-    if (::timerfd_settime(timeout_fd_, 0, &its, nullptr) < 0) {
-        LOG_ERROR("enable_idle_timeouts: timerfd_settime: %s",
-                  std::strerror(errno));
+
+    if(::timerfd_settime(timeout_fd_, 0, &its, nullptr) < 0){
+        LOG_ERROR("enable_idle_timeouts: timerfd_settime: %s", std::strerror(errno));
         ::close(timeout_fd_);
         timeout_fd_ = -1;
         return;
     }
+
     // FdWatcher owns/closes the fd; level-triggered, drained in the callback.
     add(std::make_unique<FdWatcher>(timeout_fd_, [this] { sweep_timeouts(); }),
         EPOLLIN);
@@ -109,9 +119,7 @@ void EventLoop::enable_idle_timeouts(int sweep_interval_ms) {
 
 void EventLoop::sweep_timeouts() {
     uint64_t expirations;
-    while (::read(timeout_fd_, &expirations, sizeof(expirations)) ==
-           static_cast<ssize_t>(sizeof(expirations)))
-        ;  // drain
+    while(::read(timeout_fd_, &expirations, sizeof(expirations)) == static_cast<ssize_t>(sizeof(expirations)));// drain
 
     // A timed-out handler only schedules its own (deferred) close, so iterating
     // handlers_ here is safe — the map isn't mutated mid-loop.
@@ -131,18 +139,17 @@ void EventLoop::run_pending_tasks() {
 }
 
 void EventLoop::process_pending_close() {
-    for (int fd : pending_close_) {
+    for(int fd : pending_close_){
         ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-        handlers_.erase(fd);  // destroys handler -> Socket closes the fd
+        handlers_.erase(fd);  // destroys handler, Socket closes the fd
     }
     pending_close_.clear();
 }
 
-void EventLoop::drain_wakeup() {
+void EventLoop::drain_wakeup(){
+
     uint64_t counter;
-    while (::read(wake_fd_, &counter, sizeof(counter)) > 0) {
-        // keep draining
-    }
+    while (::read(wake_fd_, &counter, sizeof(counter)) > 0){/*keep draining*/}
 }
 
 void EventLoop::stop() {
@@ -187,16 +194,14 @@ void EventLoop::run() {
             if (ev.events & EPOLLIN) {
                 handler->on_readable();
             }
-            // Claude — Date 06/19/2026
             // Skip the write callback if on_readable() already scheduled this
             // fd for close — its handler may be half torn down.
-            if ((ev.events & EPOLLOUT) && !pending_close_.count(handler->fd())) {
+            if((ev.events & EPOLLOUT) && !pending_close_.count(handler->fd())){
                 handler->on_writable();
             }
         }
-
         process_pending_close();
     }
-}
+} //run loop
 
 }  // namespace castle

@@ -1,4 +1,3 @@
-// Claude — Date 06/19/2026
 // One epoll instance + the fds registered on it. Exactly one EventLoop runs per
 // worker thread; a handler and everything it spawns (e.g. a client conn and its
 // backend conn, later) live on the same loop, so no locking is needed between

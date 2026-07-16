@@ -1,6 +1,8 @@
-// RAII wrapper around a file descriptor plus the small set of socket helpers
-// the reactor needs. Owning the fd here means connections/listeners close
-// cleanly when their handler is destroyed — no manual close() bookkeeping.
+/** Bryce Hart Jul 16
+RAII wrapper around a file descriptor plus the small set of socket helpers
+the reactor needs. Owning the fd here means connections/listeners close
+cleanly when their handler is destroyed — no manual close() bookkeeping.
+ */
 #pragma once
 
 #include <cstdint>
@@ -10,11 +12,18 @@ namespace castle {
 class Socket {
 public:
     Socket() = default;
+
     explicit Socket(int fd) : fd_(fd) {}
-    ~Socket() { close(); }
+
+    ~Socket(){ 
+        close(); 
+    }
 
     // Move-only: an fd has exactly one owner.
-    Socket(Socket&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+    Socket(Socket&& other) noexcept : fd_(other.fd_) {
+         other.fd_ = -1; 
+        }
+
     Socket& operator=(Socket&& other) noexcept {
         if (this != &other) {
             close();
@@ -24,12 +33,14 @@ public:
         return *this;
     }
     Socket(const Socket&) = delete;
+
     Socket& operator=(const Socket&) = delete;
 
-    int get() const { 
+    int get() const{ 
         return fd_; 
     }
-    bool valid() const { 
+
+    bool valid() const{ 
         return fd_ >= 0; 
     }
 
