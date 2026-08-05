@@ -58,11 +58,13 @@ private:
     int fd_ = -1;
 };
 
-// Build a non-blocking listening socket bound to 0.0.0.0:<port> with
+// Build a non-blocking listening socket bound to <bind_addr>:<port> with
 // SO_REUSEADDR + SO_REUSEPORT. SO_REUSEPORT is the load-balancing trick: every
 // per-core worker creates its own listener on the same port and the kernel
 // spreads incoming connections across them, with no shared accept lock.
-// Returns an invalid Socket and fills `err` on failure.
-Socket make_reuseport_listener(uint16_t port, int backlog, std::string& err);
+// An empty bind_addr means 0.0.0.0 (all interfaces). A specific address is
+// bound with IP_FREEBIND so it may not exist yet (e.g. the WireGuard IP before
+// wg0 is up at boot). Returns an invalid Socket and fills `err` on failure.
+Socket make_reuseport_listener(const std::string& bind_addr, uint16_t port, int backlog, std::string& err);
 
 }  // namespace castle

@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026
+// refactored Bryce Hart Jul 21
 // Byte-transport abstraction so a connection doesn't care whether it's talking
 // plaintext or TLS. The crucial detail for TLS: a read can need to WRITE (and a
 // write can need to READ) mid-handshake/key-update, so recv/send report the
@@ -29,6 +29,7 @@ public:
     virtual IoStatus handshake() = 0;
 
     virtual IoStatus recv(char* buf, size_t n, size_t& out_n) = 0;
+    
     virtual IoStatus send(const char* buf, size_t n, size_t& out_n) = 0;
 };
 
@@ -37,9 +38,14 @@ class PlainTransport : public Transport {
 public:
     explicit PlainTransport(Socket sock) : sock_(std::move(sock)) {}
 
-    int fd() const override { return sock_.get(); }
-    IoStatus handshake() override { return IoStatus::Ok; }
+    int fd() const override { 
+        return sock_.get(); 
+    }
+    IoStatus handshake() override {
+         return IoStatus::Ok; 
+        }
     IoStatus recv(char* buf, size_t n, size_t& out_n) override;
+
     IoStatus send(const char* buf, size_t n, size_t& out_n) override;
 
 private:

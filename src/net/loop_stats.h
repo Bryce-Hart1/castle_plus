@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026
+//Peer reviewed Bryce Hart 7-5-26
 // Per-loop live counters. The owning worker thread is the only writer; the
 // control plane reads them (relaxed) and sums across loops for `status`. Because
 // each loop owns its own instance and only it writes, there's no write
