@@ -36,6 +36,8 @@ public:
     // Control-plane API. Thread-safe: each posts a task to the supervisor loop
     // and waits for the result, so the work runs on the supervisor's own thread.
     std::string describe_services();
+    // Per-backend uptime / failure history / quarantine state (`backendstatus`).
+    std::string describe_backend_status();
     bool restart_service(const std::string& name);
 
 private:
@@ -48,8 +50,19 @@ private:
     void finish_if_drained();   // stop the loop once no children remain
     bool do_restart(const std::string& name);
     std::string render_services() const;
+    std::string render_backend_status() const;
     Service* find_by_pid(pid_t pid);
     Service* find_by_name(const std::string& name);
+
+    // ---- failure accounting / circuit breaker ----
+    // Record one unexpected exit (`status` as returned by waitpid) against `s`.
+    void record_failure(Service& s, int status);
+    // Stamp the start of a permanent outage (quarantine / failed-no-restart).
+    static void mark_down(Service& s);
+    // Drop failures that have aged out of the rolling window. After this call
+    // s.recent_failures.size() is the in-window failure count.
+    static void prune_failures(Service& s,
+                               std::chrono::steady_clock::time_point now);
 
     static bool tcp_health_ok(const std::string& host, uint16_t port,
                               int timeout_ms);
@@ -67,6 +80,20 @@ private:
     static constexpr int kGraceSec = 5;    // SIGTERM -> SIGKILL window
     static constexpr int kTickMs = 1000;   // supervisor tick granularity
     static constexpr int kStableSec = 10;  // ran this long => reset backoff
+
+    // Failure circuit breaker. More than kMaxFailures failures inside
+    // kFailureWindow quarantines the backend: it is logged at ERROR (mirrored to
+    // the file log as HIGH) and NOT restarted again, because a service failing
+    // this often is broken in a way restarting cannot fix — and an endless
+    // restart loop burns CPU and buries the real cause in log noise. An operator
+    // clears it with `restart <name>` once the underlying problem is addressed.
+    static constexpr int kMaxFailures = 5;
+    static constexpr std::chrono::hours kFailureWindow{24};
+
+    // A shorter bucket reported alongside the breaker's window, so "6 failures"
+    // reads differently when they all happened in the last few minutes than when
+    // they're spread across the day. Display only — the breaker ignores it.
+    static constexpr std::chrono::hours kRecentWindow{1};
 };
 
 }  // namespace castle
