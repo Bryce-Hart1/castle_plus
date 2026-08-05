@@ -38,6 +38,7 @@ namespace {
 
 struct Options {
     uint16_t port = 8080;
+    std::string bind_addr;  // listen address; empty = 0.0.0.0 (all interfaces)
     unsigned threads = 0;                       // 0 => hardware_concurrency()
     std::string control_path = "/tmp/castle.sock";  // "" disables control plane
     std::string services_path;  // services manifest; empty disables supervisor
@@ -57,6 +58,8 @@ void print_usage(const char* prog) {
                  "Usage: %s [--port N] [--threads N] [--control PATH] "
                  "[--services PATH]\n"
                  "  --port N        TCP port to listen on (default 8080)\n"
+                 "  --bind ADDR     IPv4 address to listen on (default 0.0.0.0; "
+                 "e.g. the WireGuard IP to hide castle from the LAN)\n"
                  "  --threads N     worker loops; 0/omitted = one per core\n"
                  "  --control PATH  unix control socket (default "
                  "/tmp/castle.sock; \"\" disables)\n"
@@ -90,6 +93,9 @@ bool parse_args(int argc, char** argv, Options& opts) {
         long val = 0;
         if (arg == "--port" && next(val) && val > 0 && val <= 65535) {
             opts.port = static_cast<uint16_t>(val);
+        } else if (arg == "--bind") {
+            if (i + 1 >= argc) return false;
+            opts.bind_addr = argv[++i];
         } else if (arg == "--threads" && next(val) && val >= 0) {
             opts.threads = static_cast<unsigned>(val);
         } else if (arg == "--control") {
@@ -244,7 +250,8 @@ int main(int argc, char** argv) {
         auto loop = std::make_unique<castle::EventLoop>();
 
         std::string err;
-        castle::Socket lsock = castle::make_reuseport_listener(opts.port, 1024, err);
+        castle::Socket lsock =
+            castle::make_reuseport_listener(opts.bind_addr, opts.port, 1024, err);
         if (!lsock.valid()) {
             LOG_ERROR("failed to create listener #%u: %s", i, err.c_str());
             return 1;
@@ -255,7 +262,10 @@ int main(int argc, char** argv) {
         loops.push_back(std::move(loop));
     }
 
-    LOG_INFO("castle++ listening on port %u with %u worker loop(s) [%s]",
+    // Log the bound address: with IP_FREEBIND a typo'd --bind still "succeeds"
+    // and silently receives nothing, so this line is the operator's sanity check.
+    LOG_INFO("castle++ listening on %s:%u with %u worker loop(s) [%s]",
+             opts.bind_addr.empty() ? "0.0.0.0" : opts.bind_addr.c_str(),
              opts.port, n_threads,
              opts.routes_path.empty() ? "echo"
                                       : (tls_enabled ? "https" : "http-proxy"));
