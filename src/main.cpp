@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "config/service_config.h"
-#include "control/control_server.h"
+#include "control/control_server.hpp"
 #include "gateway/rate_limiter.h"
 #include "http/http_connection.h"
 #include "http/router.h"
