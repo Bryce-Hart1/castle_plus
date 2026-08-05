@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026
+// Claude — Date 06/19/2026 Peer reviewed Bryce Hart 7-04-26
 // The control plane. Runs on its own thread, off the data path, listening on a
 // Unix-domain socket so admin traffic never competes with request serving and
 // can't be reached from the network. Two ways it talks to the workers:
@@ -22,14 +22,19 @@ namespace castle {
 class EventLoop;
 class Supervisor;
 
+std::string systemStatusHelper();
+
+// Per-backend uptime, failure counts and quarantine state. Takes the supervisor
+// (may be null) rather than reading service state directly: that state lives on
+// the supervisor thread, so the call has to be marshalled onto it.
+std::string backendStatusHelper(Supervisor* supervisor);
+
 class ControlServer {
 public:
     // `loops` are borrowed (not owned) for stats/health; `on_shutdown` is
     // invoked when an admin issues `shutdown`. `supervisor` is optional (may be
     // null) — when present, the `services`/`restart` commands are enabled.
-    ControlServer(std::string socket_path, std::vector<EventLoop*> loops,
-                  std::function<void()> on_shutdown,
-                  Supervisor* supervisor = nullptr);
+    ControlServer(std::string socket_path, std::vector<EventLoop*> loops, std::function<void()> on_shutdown, Supervisor* supervisor = nullptr);
     ~ControlServer();
 
     ControlServer(const ControlServer&) = delete;

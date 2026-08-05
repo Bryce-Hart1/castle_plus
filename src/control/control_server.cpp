@@ -2,7 +2,7 @@
 // the data path, so it can afford to block in poll()/read() without hurting
 // throughput. poll() always watches stop_fd_ alongside the real fd so shutdown
 // interrupts even a parked admin session.
-#include "control/control_server.h"
+#include "control/control_server.hpp"
 #include "util/autocorrect.hpp"
 
 #include <poll.h>
@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "util/hardware.hpp"
 
 #include "net/event_loop.h"
 #include "supervisor/supervisor.h"
@@ -50,16 +51,13 @@ void write_all(int fd, const std::string& s) {
 
 }  // namespace
 
-ControlServer::ControlServer(std::string socket_path,
-                             std::vector<EventLoop*> loops,
-                             std::function<void()> on_shutdown,
-                             Supervisor* supervisor)
-    : socket_path_(std::move(socket_path)),
-      loops_(std::move(loops)),
-      on_shutdown_(std::move(on_shutdown)),
-      supervisor_(supervisor) {}
+ControlServer::ControlServer(std::string socket_path, std::vector<EventLoop*> loops, std::function<void()> on_shutdown,
+Supervisor* supervisor) : socket_path_(std::move(socket_path)), loops_(std::move(loops)), on_shutdown_(std::move(on_shutdown)),
+supervisor_(supervisor) {}
 
-ControlServer::~ControlServer() { stop(); }
+ControlServer::~ControlServer() {
+    stop(); 
+}
 
 bool ControlServer::start() {
     listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -194,6 +192,67 @@ void ControlServer::handle_client(int cfd) {
     }
 }
 
+// Vitals read straight off procfs/sysfs (util/hardware.hpp). Every reader is
+// optional: a missing /proc file, or a thermal zone that needs root, reports
+// "unavailable" rather than failing the command. Values are rendered to two
+// decimals — std::to_string gives six, which is noise for a load average.
+std::string systemStatusHelper() {
+    const char* kUnavailable = "unavailable";
+
+    auto fixed2 = [](double v) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2f", v);
+        return std::string(buf);
+    };
+
+    std::string out;
+
+    const std::optional<std::size_t> threads = bstd::system::threadCount();
+    out += "threads:   ";
+    out += threads ? std::to_string(*threads) : kUnavailable;
+    out += '\n';
+
+    const std::optional<bstd::system::LoadAverage> load =
+        bstd::system::loadAverages();
+    out += "load:      ";
+    if (load) {
+        out += fixed2(load->oneMinute) + " (1m)  " +
+               fixed2(load->fiveMinute) + " (5m)  " +
+               fixed2(load->fifteenMinute) + " (15m)";
+    } else {
+        out += kUnavailable;
+    }
+    out += '\n';
+
+    const std::optional<double> temp = bstd::system::cpuTemp(0);
+    out += "cpu_temp:  ";
+    out += temp ? fixed2(*temp) + " C" : kUnavailable;
+    out += '\n';
+
+    const std::optional<std::uint64_t> mem_free = bstd::system::memoryFree();
+    const std::optional<std::uint64_t> mem_total = bstd::system::memoryTotal();
+    out += "memory:    ";
+    if (mem_free && mem_total) {
+        out += std::to_string(*mem_free) + " MB available of " +
+               std::to_string(*mem_total) + " MB";
+    } else if (mem_free) {
+        out += std::to_string(*mem_free) + " MB available";
+    } else {
+        out += kUnavailable;
+    }
+    out += '\n';
+
+    return out;
+}
+// Each backend's runtime, failure count, and most recent failure (if any), plus
+// a callout for anything the failure circuit breaker has quarantined. The
+// rendering itself lives in the Supervisor because that's the thread that owns
+// the service table; this just marshals the call and handles "no supervisor".
+std::string backendStatusHelper(Supervisor* supervisor) {
+    if (!supervisor) return "no supervisor configured (start castle with --services)\n";
+    return supervisor->describe_backend_status();
+}
+
 std::string ControlServer::dispatch(const std::string& raw, bool& close_session) {
     // Trim surrounding whitespace; first token is the command.
     size_t b = raw.find_first_not_of(" \t\r\n");
@@ -217,15 +276,17 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
      */
     if (cmd == "help") {
         return "commands:\n"
-               "  help            this text\n"
-               "  ping            liveness check -> pong\n"
-               "  status          aggregated counters across all loops\n"
-               "  health          probe every loop via the async round-trip\n"
-               "  services        list supervised backends\n"
-               "  restart <name>  restart a supervised backend\n"
-               "  errors          log lines since the last pull (needs --log-file)\n"
-               "  shutdown        gracefully stop castle++\n"
-               "  exit            close this admin session\n";
+            "  help            this text\n"
+            "  ping            liveness check -> pong\n"
+            "  status          aggregated counters across all loops\n"
+            "  health          probe every loop via the async round-trip\n"
+            "  services        list supervised backends\n"
+            "  restart <name>  restart a supervised backend\n"
+            "  errors          log lines since the last pull (needs --log-file)\n"
+            "  shutdown        gracefully stop castle++\n"
+            "  systemstatus    current system vitals (load, memory, temp)\n"
+            "  backendstatus   per-backend uptime, failure history, quarantine\n"
+            "  exit            close this admin session\n";
     }
     if (cmd == "ping") return "pong\n";
     if (cmd == "status" || cmd == "stats") return cmd_status();
@@ -246,24 +307,38 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
         if (on_shutdown_) on_shutdown_();
         return "shutting down castle+...\n";
     }
+    if(cmd == "systemstatus"){
+        return systemStatusHelper();
+    }
+    if(cmd == "backendstatus"){
+        return backendStatusHelper(supervisor_);
+    }
     if (cmd == "exit" || cmd == "quit") {
         close_session = true;
         return "bye\n";
     }
     // bryce hart 7-1-26
     // Nothing above matched, so cmd is unknown: offer the closest real command
-    // via the autocorrect filter. Reaching here IS the membership check — every
-    // valid command/alias returns earlier — so no separate command list is
+    // via the autocorrect filter. Reaching here IS the membership check every
+    // valid command/alias returns earlier so no separate command list is
     // needed. The dictionary mirrors the commands (and aliases) handled above;
     // its string_views point at string literals, so they outlive this call, and
     // the filter is built once (static) rather than per dispatch.
     static const bstd::autoCorrectFilter filter(3, {
         "help", "ping", "status", "stats", "health", "errors",
-        "services", "backends", "restart", "shutdown", "exit", "quit"});
-    const std::string suggestion = filter.fix(cmd);
-    if (suggestion != cmd) {
-        return "unknown command: " + cmd + " — did you mean '" + suggestion +
-               "'?\n";
+        "services", "backends", "restart", "shutdown", "exit", "quit",
+        "systemstatus", "backendstatus"});
+    // The command string is raw user input; an exception escaping this thread
+    // would terminate the whole process, so a failed suggestion must never be
+    // worse than no suggestion.
+    try {
+        const std::string suggestion = filter.fix(cmd);
+        if (suggestion != cmd) {
+            return "unknown command: " + cmd + " — did you mean '" + suggestion +
+                   "'?\n";
+        }
+    } catch (const std::exception&) {
+        // fall through to the plain unknown-command reply
     }
     return "unknown command: " + cmd + " (try 'help')\n";
 }
