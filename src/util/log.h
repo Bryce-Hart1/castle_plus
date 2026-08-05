@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026 last changed: 07/05/2026 by: Claude
+// Claude — Date 06/19/2026 last changed: 07/05/2026 by: Bryce Hart
 // castle's logging front-end. Everything goes to stderr (captured by journald
 // under systemd). WARN/ERROR are ALSO mirrored into Bryce's file logger
 // (bstd::store::Logger in util/log.hpp) for later retrieval — enabled with
@@ -124,9 +124,9 @@ inline void log_msg(LogLevel level, const char* fmt, ...) {
     if (level != LogLevel::Info && file_logger()) {
         try {
             file_logger()->write(msg, level == LogLevel::Error
-                                          ? bstd::store::Logger::HIGH
-                                          : bstd::store::Logger::WARNING);
-        } catch (const std::exception& e) {
+                ? bstd::store::Logger::HIGH //high
+                : bstd::store::Logger::WARNING); //else warning
+        }catch(const std::exception& e){
             std::fprintf(stderr, "[log] file write failed (%s)\n", e.what());
         }
     }
