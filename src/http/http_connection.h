@@ -93,6 +93,7 @@ private:
     bool responded_ = false;   // have we sent any response bytes yet?
     bool handshake_done_ = false;
     bool closed_ = false;      // guards against re-entrant teardown
+    bool client_eof_ = false;    // client half-closed; response still owed to it
     bool read_paused_ = false;   // our client reads paused (upload backpressure)
     bool backend_paused_ = false;  // we paused the backend (download backpressure)
     uint32_t interest_ = 0;    // current epoll interest (avoid redundant updates)

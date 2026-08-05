@@ -52,19 +52,27 @@ bool is_hop_by_hop(const char* name, size_t len) {
     return false;
 }
 
+// Strict Content-Length parse: digits only, non-empty, no sign/whitespace/junk
+// (picohttpparser already trims OWS around the value). strtol was too lax here
+// ("5abc" -> 5, silent saturation on overflow) — and castle frames the body it
+// forwards off this value, so front/back disagreement is a request-smuggling
+// primitive. The 18-digit cap guarantees the value fits a long.
+bool parse_content_length(const char* v, size_t len, long& out) {
+    if (len == 0 || len > 18) return false;
+    long n = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (v[i] < '0' || v[i] > '9') return false;
+        n = n * 10 + (v[i] - '0');
+    }
+    out = n;
+    return true;
+}
+
 }  // namespace
 
-HttpConnection::HttpConnection(EventLoop& loop,
-                               std::unique_ptr<Transport> transport,
-                               const Router& router,
-                               std::chrono::seconds timeout, size_t max_body)
-    : loop_(loop),
-      transport_(std::move(transport)),
-      router_(router),
-      timeout_(timeout),
-      max_body_(max_body),
-      last_activity_(std::chrono::steady_clock::now()),
-      interest_(EPOLLIN | EPOLLET) {  // matches how the listener registered us
+HttpConnection::HttpConnection(EventLoop& loop, std::unique_ptr<Transport> transport, const Router& router, std::chrono::seconds timeout, size_t max_body)
+: loop_(loop), transport_(std::move(transport)), router_(router), timeout_(timeout), max_body_(max_body), last_activity_(std::chrono::steady_clock::now()),
+interest_(EPOLLIN | EPOLLET) {  // matches how the listener registered us
     active_conn_count().fetch_add(1, std::memory_order_relaxed);  // global cap
     loop_.stats().active_connections.fetch_add(1, std::memory_order_relaxed);
     loop_.stats().total_connections.fetch_add(1, std::memory_order_relaxed);
@@ -110,6 +118,7 @@ IoStatus HttpConnection::pump_read() {
     char buf[16384];
     for (;;) {
         if (read_paused_) return IoStatus::WouldBlockRead;  // upload backpressure
+        if (client_eof_) return IoStatus::WouldBlockRead;   // nothing more coming
         size_t got = 0;
         IoStatus st = transport_->recv(buf, sizeof(buf), got);
         if (st == IoStatus::Ok) {
@@ -120,7 +129,20 @@ IoStatus HttpConnection::pump_read() {
             if (closed_) return IoStatus::Closed;
             continue;
         }
-        if (st == IoStatus::Closed || st == IoStatus::Error) {
+        if (st == IoStatus::Closed) {
+            // A client that half-closes (shutdown(SHUT_WR)) after sending its
+            // request is still waiting for the response — tearing down here
+            // would destroy a reply that's already in flight. Once the request
+            // is fully forwarded, EOF just means "no more request bytes": stop
+            // reading and let the response finish draining.
+            if (state_ == State::Streaming || state_ == State::Closing) {
+                client_eof_ = true;
+                return IoStatus::WouldBlockRead;
+            }
+            close_both();  // EOF mid-head or mid-upload is a genuine abort
+            return st;
+        }
+        if (st == IoStatus::Error) {
             close_both();
             return st;
         }
@@ -179,8 +201,9 @@ void HttpConnection::recompute_interest() {
     bool want_in = false, want_out = false;
 
     // Read side: keep reading (more request data / notice client close) unless
-    // we're paused for upload backpressure, or the read wants to write (TLS).
-    if (!read_paused_) {
+    // we're paused for upload backpressure, the client already sent EOF (nothing
+    // more will ever arrive), or the read wants to write (TLS).
+    if (!read_paused_ && !client_eof_) {
         if (read_block_ == IoStatus::WouldBlockWrite)
             want_out = true;
         else
@@ -198,9 +221,10 @@ void HttpConnection::recompute_interest() {
     uint32_t ev = EPOLLET;
     if (want_in) ev |= EPOLLIN;
     if (want_out) ev |= EPOLLOUT;
-    // Watch for readable by default — but not while deliberately paused (then we
-    // go quiet until the backend drains; EPOLLHUP still fires regardless).
-    if (!want_in && !want_out && !read_paused_) ev |= EPOLLIN;
+    // Watch for readable by default — but not while deliberately paused, nor
+    // after client EOF (then we go quiet until there's something to write;
+    // EPOLLHUP/EPOLLERR still fire regardless).
+    if (!want_in && !want_out && !read_paused_ && !client_eof_) ev |= EPOLLIN;
     set_interest(ev);
 }
 
@@ -239,6 +263,7 @@ void HttpConnection::process_head() {
 
     std::string host;
     long content_length = 0;
+    bool saw_content_length = false;
     bool chunked = false;
 
     std::string head;
@@ -253,9 +278,20 @@ void HttpConnection::process_head() {
         if (h.name == nullptr) continue;  // header continuation line
         if (iequals(h.name, h.name_len, "host"))
             host.assign(h.value, h.value_len);
-        if (iequals(h.name, h.name_len, "content-length"))
-            content_length = std::strtol(
-                std::string(h.value, h.value_len).c_str(), nullptr, 10);
+        if (iequals(h.name, h.name_len, "content-length")) {
+            // Duplicate Content-Length headers are rejected outright (even
+            // identical ones): castle would frame off one while forwarding
+            // both, and a backend picking the other is a smuggling desync.
+            if (saw_content_length) {
+                send_error(400, "Bad Request", "duplicate content-length");
+                return;
+            }
+            saw_content_length = true;
+            if (!parse_content_length(h.value, h.value_len, content_length)) {
+                send_error(400, "Bad Request", "invalid content-length");
+                return;
+            }
+        }
         if (iequals(h.name, h.name_len, "transfer-encoding")) chunked = true;
 
         if (is_hop_by_hop(h.name, h.name_len)) continue;
@@ -266,12 +302,12 @@ void HttpConnection::process_head() {
     }
     head += "Connection: close\r\n\r\n";
 
+    // Checking Transfer-Encoding before ever using content_length is
+    // load-bearing for smuggling defense: a TE+CL request must die here, never
+    // reach framing. (parse_content_length can't produce negatives, so no < 0
+    // check is needed.)
     if (chunked) {
         send_error(501, "Not Implemented", "chunked request body unsupported");
-        return;
-    }
-    if (content_length < 0) {
-        send_error(400, "Bad Request", "invalid content-length");
         return;
     }
     if (max_body_ != 0 && static_cast<size_t>(content_length) > max_body_) {
