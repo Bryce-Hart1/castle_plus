@@ -1,0 +1,86 @@
+#!/sbin/openrc-run
+# castle++ under OpenRC (Alpine Linux). The systemd unit in systemd/castle.service
+# is for Debian-family hosts; this file is its Alpine counterpart. See deploy.md.
+#
+# Install:
+#   install -m 0755 openrc/castle.initd /etc/init.d/castle
+#   rc-update add castle default
+#   rc-service castle start
+#
+# supervise-daemon (not start-stop-daemon) is what gives us the equivalent of
+# systemd's Restart=on-failure: it stays resident, watches the pid, and relaunches
+# castle if it dies. castle in turn supervises the app backends, so the same
+# two-level hierarchy as the systemd deployment holds.
+
+name="castle++"
+description="castle++ buffer (reverse proxy + process supervisor)"
+
+command="/opt/castle/castle"
+command_args="--port 8443
+	--routes   /opt/castle/config/routes.conf
+	--services /opt/castle/config/services.conf
+	--control  /run/castle/castle.sock
+	--log-file /var/log/castle/castle.log
+	--max-conn 2000 --rate 50"
+
+command_user="castle:castle"
+supervisor="supervise-daemon"
+pidfile="/run/castle/castle.pid"
+
+# castle logs to stderr (the file logger only mirrors WARN/ERROR). Keep the full
+# stream on disk — this is the journald substitute.
+output_log="/var/log/castle/stdout.log"
+error_log="/var/log/castle/stderr.log"
+
+# Equivalent of LimitNOFILE=65536: --max-conn 2000 costs ~2 fds per in-flight
+# request (client + backend), plus the backends' own fds.
+rc_ulimit="-n 65536"
+
+# --- Hardening -------------------------------------------------------------
+# These are the systemd unit's directives that OpenRC can actually reproduce.
+# Everything below applies to the supervised backends too, because castle
+# fork/execs them and they inherit all of it. deploy.md lists the systemd
+# directives that have NO OpenRC equivalent, so the gap is explicit rather
+# than assumed away.
+no_new_privs="yes"     # NoNewPrivileges=true
+umask="0077"           # UMask=0077
+# No `capabilities=` line on purpose: OpenRC parses it as a libcap IAB string and
+# rejects the empty value, so systemd's `CapabilityBoundingSet=` has no direct
+# equivalent. It costs us little here — castle runs as a non-root user on a high
+# port, so its effective/permitted capability sets are already empty, and
+# no_new_privs blocks regaining any via setuid. If you ever need to bind a port
+# below 1024 directly, set:  capabilities="^cap_net_bind_service"
+
+# Restart=on-failure + RestartSec=2, with a backoff so a hard-failing binary
+# doesn't spin. Empty respawn_max = keep trying (systemd's default too).
+respawn_delay=2
+respawn_delay_step=2
+respawn_delay_cap=60
+respawn_period=1800
+
+depend() {
+	need net
+	after firewall
+	# If ExecStart uses `--bind 10.8.0.2` (the WireGuard IP), also order after the
+	# tunnel. Advisory only: castle binds with IP_FREEBIND, so it starts fine
+	# before wg0 exists.
+	# after wg-quick.wg0
+}
+
+start_pre() {
+	# systemd's RuntimeDirectory=/LogsDirectory= equivalents. checkpath creates
+	# them with the right owner/mode on every start, including after a /run wipe.
+	checkpath --directory --owner castle:castle --mode 0755 /run/castle
+	checkpath --directory --owner castle:castle --mode 0750 /var/log/castle
+}
+
+# `rc-service castle reload` -> SIGHUP -> live TLS cert reload (Let's Encrypt
+# renewals), no restart and no dropped connections. Point acme.sh's deploy hook
+# at this. The signal must go to castle itself, not to the supervise-daemon
+# wrapper, so this reads the supervised pid rather than using the default.
+reload() {
+	ebegin "Reloading $name (SIGHUP: TLS certificate)"
+	supervise-daemon "${RC_SVCNAME}" --signal HUP \
+		--pidfile "${pidfile}"
+	eend $?
+}
