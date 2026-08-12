@@ -1,7 +1,7 @@
-# castle++
+# castle+
 
 A from-scratch reverse proxy and process supervisor in C++20, built on a raw
-`epoll` reactor. No frameworks, no dependencies beyond OpenSSL — a single
+`epoll` reactor. No frameworks, no dependencies beyond OpenSSL a single
 ~5,000-line binary that fronts every service on a machine.
 
 It is the *buffer* between the public internet and the apps behind it: it
@@ -9,8 +9,8 @@ terminates TLS, routes requests to backends, launches and babysits those
 backends, and gives you a control socket to ask what's going on.
 
 > **Linux only, by design.** The core is an epoll reactor using `signalfd`,
-> `timerfd`, `eventfd` and `accept4`. There is no architecture-specific code —
-> it builds on x86-64 and arm64, against both glibc and musl. It does not build
+> `timerfd`, `eventfd` and `accept4`. There is no architecture-specific code.
+> It builds on x86-64 and arm64, against both glibc and musl. It does not build
 > on macOS or Windows.
 
 ---
@@ -19,9 +19,9 @@ backends, and gives you a control socket to ask what's going on.
 
 A Lenovo ThinkCentre M900 sitting in my house runs every site and service I
 host. It has no public IP. A free VPS forwards raw TCP `:443` over a WireGuard
-tunnel to the M900, where castle++ is the only thing listening.
+tunnel to the M900, where castle+ is the only thing listening.
 
-From there castle++ does all of it:
+From there castle+ does all of it:
 
 - **terminates TLS** with a Let's Encrypt cert — the VPS forwards bytes, it
   never sees plaintext, and never holds a key
@@ -39,16 +39,22 @@ internet.
 
 ---
 
+## Why build this?
+
+Castle+ is my reaction to wanting to get closer to the hardware, on my own. Alpine Linux was
+the perfect testing ground for a project like this. I wanted to not only test my networking knowledge,
+but also use modern C++ in a way that is actually everyday useful.
+
 ## Features
 
 ### Networking core
 - **One event loop per core.** Each worker thread opens its *own* listening
   socket on the same port with `SO_REUSEPORT`, so the kernel load-balances new
-  connections across cores with no shared accept lock and no thundering herd.
+  connections across cores with no shared accept lock.
 - **Edge-triggered epoll**, fully non-blocking. Every handler drains to `EAGAIN`.
-- **Deferred close.** A callback can request its own teardown mid-dispatch; the
-  loop destroys handlers at the end of the batch, so nothing is freed underfoot.
-- **Cross-thread task posting** via `eventfd` — other threads hand work to a
+- **Deferred close.** A callback can request its own teardown mid-dispatch, the
+  loop destroys handlers at the end of the batch, so nothing is freed underneath.
+- **Cross-thread task posting** via `eventfd`, other threads hand work to a
   loop and get an async ack back, instead of taking locks on loop state.
 - **Idle timeouts** on a per-loop `timerfd` sweep, so slow-loris clients and
   hung backends get reaped (`--timeout`, default 30s).
@@ -60,7 +66,7 @@ internet.
   forwarded to the backend as they arrive — never buffered whole — and reads are
   paused when a peer's send buffer crosses 256 KiB, resuming below 64 KiB. An
   upload or download of any size runs in bounded memory, which is what lets
-  castle++ front a file or photo vault.
+  castle+ front a file or photo vault.
 - Synthesizes `404`, `413`, `431`, `502`, `501` itself when it must.
 - **Request-smuggling defenses**: `Transfer-Encoding` + `Content-Length` is
   rejected before framing, duplicate `Content-Length` headers are rejected even
@@ -96,7 +102,7 @@ internet.
 - `--rate` / `--rate-burst` — per-IP token bucket, memory-bounded with a shared
   overflow bucket so a diverse-IP flood can't grow the table without limit.
 - Both are enforced **at accept time**, before any TLS or HTTP work is spent.
-- `--bind` an address with `IP_FREEBIND`, so castle++ can bind a WireGuard IP
+- `--bind` an address with `IP_FREEBIND`, so castle+ can bind a WireGuard IP
   that doesn't exist yet at boot and hide itself from the LAN entirely.
 - Every fd is `CLOEXEC`; nothing leaks into a spawned backend.
 
@@ -118,9 +124,9 @@ its own thread, off the data path.
 | `shutdown` | graceful stop |
 
 Typo a command and it suggests the right one, via a QWERTY-aware autocorrect
-built for the purpose.
+built for the purpose. (for more on it specifically, go check out my other project, myLib)
 
-```
+```text
 $ printf 'backendstatus\n' | nc -U /run/castle/castle.sock
 NAME                 STATE        UPTIME       FAILURES: 1h  24h  TOTAL   LAST FAILURE
 web                  running      2h 13m       0             0    0       -
@@ -134,6 +140,7 @@ PERMANENTLY DOWN — not being restarted:
 ```
 
 ### Logging
+
 Everything goes to stderr (journald / OpenRC log files pick it up). `--log-file`
 additionally mirrors WARN and ERROR into a file that the `errors` command reads
 back **incrementally** — each pull returns only what's new since the last one.
@@ -167,7 +174,7 @@ That produces a single binary at `build/castle`.
 
 ### Try it in 30 seconds
 
-With no `--routes`, castle++ is a plain echo server — useful for confirming the
+With no `--routes`, castle+ is a plain echo server — useful for confirming the
 reactor works before you configure anything:
 
 ```sh
@@ -200,7 +207,7 @@ path    = /
 backend = 127.0.0.1:9001
 ```
 
-**`services.conf`** — what castle++ launches and supervises:
+**`services.conf`** — what  launches and supervises:
 
 ```ini
 [web]
@@ -229,7 +236,7 @@ In production the cert comes from Let's Encrypt; `systemctl reload castle` (or
 ### Run it as a service
 
 An OpenRC service script is included at [`openrc/castle.initd`](openrc/castle.initd)
-— it runs castle++ under `supervise-daemon` as a dedicated non-root user with
+— it runs castle+ under `supervise-daemon` as a dedicated non-root user with
 restart backoff, an fd limit, and a `reload` that triggers the live cert swap.
 
 ```sh
@@ -300,6 +307,4 @@ Honest about what it isn't yet:
 
 ## License
 
-The vendored `third_party/picohttpparser` is MIT (see its header). Choose a
-license for the rest before publishing — without a `LICENSE` file, others have
-no rights to use it.
+The vendored `third_party/picohttpparser` is MIT, along with this project. Feel free to use!
