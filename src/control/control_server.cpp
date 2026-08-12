@@ -35,10 +35,10 @@ namespace {
 
 // Best-effort blocking write of the whole buffer. Admin traffic is tiny; we
 // just want correctness, not throughput. Errors end the session.
-void write_all(int fd, const std::string& s) {
+void write_all(int fd, const std::string& str){
     size_t off = 0;
-    while (off < s.size()) {
-        ssize_t n = ::write(fd, s.data() + off, s.size() - off);
+    while (off < str.size()) {
+        ssize_t n = ::write(fd, str.data() + off, str.size() - off);
         if (n > 0) {
             off += static_cast<size_t>(n);
         } else if (errno == EINTR) {
@@ -131,7 +131,9 @@ void ControlServer::stop() {
         ::close(stop_fd_);
         stop_fd_ = -1;
     }
-    if (!socket_path_.empty()) ::unlink(socket_path_.c_str());
+    if (!socket_path_.empty()){
+        ::unlink(socket_path_.c_str());
+    }
 }
 
 void ControlServer::run() {
@@ -158,11 +160,12 @@ void ControlServer::run() {
 }
 
 void ControlServer::handle_client(int cfd) {
-    write_all(cfd, "castle++ control — type 'help'\n");
+    write_all(cfd, " --------| Welcome back to the castle |--------");
+    write_all(cfd, "castle+ control — type 'help'\n");
 
     std::string inbuf;
     char buf[1024];
-    while (running_.load(std::memory_order_acquire)) {
+    while(running_.load(std::memory_order_acquire)){ 
         pollfd fds[2];
         fds[0] = {cfd, POLLIN, 0};
         fds[1] = {stop_fd_, POLLIN, 0};
@@ -176,7 +179,7 @@ void ControlServer::handle_client(int cfd) {
         if (!(fds[0].revents & POLLIN)) continue;
 
         ssize_t n = ::read(cfd, buf, sizeof(buf));
-        if (n <= 0) break;  // client closed or error
+        if (n <= 0) break;  // client closed or theres a error
         inbuf.append(buf, static_cast<size_t>(n));
 
         size_t nl;
@@ -212,14 +215,13 @@ std::string systemStatusHelper() {
     out += threads ? std::to_string(*threads) : kUnavailable;
     out += '\n';
 
-    const std::optional<bstd::system::LoadAverage> load =
-        bstd::system::loadAverages();
+    const std::optional<bstd::system::LoadAverage> load = bstd::system::loadAverages();
     out += "load:      ";
-    if (load) {
+    if(load){
         out += fixed2(load->oneMinute) + " (1m)  " +
                fixed2(load->fiveMinute) + " (5m)  " +
                fixed2(load->fifteenMinute) + " (15m)";
-    } else {
+    }else{
         out += kUnavailable;
     }
     out += '\n';
@@ -235,7 +237,7 @@ std::string systemStatusHelper() {
     if (mem_free && mem_total) {
         out += std::to_string(*mem_free) + " MB available of " +
                std::to_string(*mem_total) + " MB";
-    } else if (mem_free) {
+    } else if(mem_free){
         out += std::to_string(*mem_free) + " MB available";
     } else {
         out += kUnavailable;
@@ -283,7 +285,7 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
             "  services        list supervised backends\n"
             "  restart <name>  restart a supervised backend\n"
             "  errors          log lines since the last pull (needs --log-file)\n"
-            "  shutdown        gracefully stop castle++\n"
+            "  shutdown        gracefully stop castle+\n"
             "  systemstatus    current system vitals (load, memory, temp)\n"
             "  backendstatus   per-backend uptime, failure history, quarantine\n"
             "  exit            close this admin session\n";
@@ -317,13 +319,11 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
         close_session = true;
         return "bye\n";
     }
-    // bryce hart 7-1-26
+    // bryce hart 7-1-26 - Updated 8-11-26
     // Nothing above matched, so cmd is unknown: offer the closest real command
-    // via the autocorrect filter. Reaching here IS the membership check every
-    // valid command/alias returns earlier so no separate command list is
-    // needed. The dictionary mirrors the commands (and aliases) handled above;
-    // its string_views point at string literals, so they outlive this call, and
+    // with bstd's autocorrect filter
     // the filter is built once (static) rather than per dispatch.
+
     static const bstd::autoCorrectFilter filter(3, {
         "help", "ping", "status", "stats", "health", "errors",
         "services", "backends", "restart", "shutdown", "exit", "quit",
@@ -331,7 +331,7 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
     // The command string is raw user input; an exception escaping this thread
     // would terminate the whole process, so a failed suggestion must never be
     // worse than no suggestion.
-    try {
+    try{
         const std::string suggestion = filter.fix(cmd);
         if (suggestion != cmd) {
             return "unknown command: " + cmd + " — did you mean '" + suggestion +
@@ -346,9 +346,11 @@ std::string ControlServer::dispatch(const std::string& raw, bool& close_session)
 std::string ControlServer::cmd_errors() {
     // First call returns the whole log; each later call returns only what's new.
     std::vector<std::string> lines = castle::log_pull_new();
-    if (lines.empty()) return "no new log entries since last pull\n";
+    if (lines.empty()){
+         return "no new log entries since last pull\n";
+    }
     std::string out;
-    for (const auto& l : lines) {
+    for (const auto& l : lines){
         out += l;
         out += '\n';
     }

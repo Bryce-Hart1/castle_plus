@@ -1,0 +1,20 @@
+# Build artifacts and editor cruft.
+/build/
+*.o
+*.obj
+*.pem
+*.key
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+.DS_Store
+.env
+
+#not public (yet)
+vps
+
+#Local
+notes.md
+deploy.md
+Dockerfile
