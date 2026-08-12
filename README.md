@@ -48,6 +48,7 @@ but also use modern C++ in a way that is actually everyday useful.
 ## Features
 
 ### Networking core
+
 - **One event loop per core.** Each worker thread opens its *own* listening
   socket on the same port with `SO_REUSEPORT`, so the kernel load-balances new
   connections across cores with no shared accept lock.
@@ -60,6 +61,7 @@ but also use modern C++ in a way that is actually everyday useful.
   hung backends get reaped (`--timeout`, default 30s).
 
 ### HTTP reverse proxy
+
 - Requests parsed with vendored **picohttpparser**.
 - Routed by `Host` + **longest path-prefix**, most specific match wins.
 - **Streaming bodies in both directions with backpressure.** Request bodies are
@@ -75,6 +77,7 @@ but also use modern C++ in a way that is actually everyday useful.
 - Hop-by-hop headers stripped before forwarding.
 
 ### TLS termination
+
 - Non-blocking **OpenSSL driven inside the event loop** through a `Transport`
   abstraction — a TLS read that needs to *write* re-arms epoll in the right
   direction, and vice versa.
@@ -84,6 +87,7 @@ but also use modern C++ in a way that is actually everyday useful.
   rejected while the current one keeps serving.
 
 ### Process supervisor
+
 - Launches backends from a manifest, `fork`/`execv` with optional working dir.
 - Reaps children through **`signalfd`**, not a signal handler — no async-signal
   safety hazards, no self-pipe.
@@ -98,6 +102,7 @@ but also use modern C++ in a way that is actually everyday useful.
 - Graceful drain on shutdown: `SIGTERM`, grace period, then `SIGKILL`.
 
 ### Hardening
+
 - `--max-conn` — global concurrent connection cap.
 - `--rate` / `--rate-burst` — per-IP token bucket, memory-bounded with a shared
   overflow bucket so a diverse-IP flood can't grow the table without limit.
@@ -107,9 +112,11 @@ but also use modern C++ in a way that is actually everyday useful.
 - Every fd is `CLOEXEC`; nothing leaks into a spawned backend.
 
 ### Control plane
+
 A Unix-domain socket — deliberately not reachable from the network — served on
 its own thread, off the data path.
 
+```text
 | command | what it does |
 |---|---|
 | `help` | list commands |
@@ -122,6 +129,7 @@ its own thread, off the data path.
 | `restart <name>` | restart a backend (and clear its quarantine) |
 | `errors` | log lines since the last pull |
 | `shutdown` | graceful stop |
+```
 
 Typo a command and it suggests the right one, via a QWERTY-aware autocorrect
 built for the purpose. (for more on it specifically, go check out my other project, myLib)
@@ -254,7 +262,7 @@ the supervisor's backends are children in the same cgroup, systemd's default
 
 ### Options
 
-```
+```text
 --port N         TCP port to listen on (default 8080)
 --bind ADDR      IPv4 address to listen on (default 0.0.0.0)
 --threads N      worker loops; 0/omitted = one per core
@@ -275,7 +283,7 @@ the supervisor's backends are children in the same cgroup, systemd's default
 
 ## Layout
 
-```
+```text
 src/
   main.cpp          per-core loops, signal-driven shutdown
   net/              socket RAII, epoll loop, listener, transport, echo
