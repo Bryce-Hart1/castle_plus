@@ -1,4 +1,12 @@
-# castle+
+```text
+               _   _                  
+  ___ __ _ ___| |_| | ___   _   
+ / __/ _` / __| __| |/ _ \_| |_ 
+| (_| (_| \__ \ |_| |  __/_   _|
+ \___\__,_|___/\__|_|\___| |_|
+```
+An open source project by Bryce Hart
+---
 
 A from-scratch reverse proxy and process supervisor in C++20, built on a raw
 `epoll` reactor. No frameworks, no dependencies beyond OpenSSL a single
