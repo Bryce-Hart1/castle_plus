@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026
+// Bryce Hart Aug 12 26
 // Small, strict INI parser for the services manifest. Strict on purpose: a typo
 // in a manifest that launches processes should fail loudly, not silently.
 #include "config/service_config.h"
@@ -12,11 +12,13 @@ namespace castle {
 
 namespace {
 
-std::string trim(const std::string& s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
+std::string trim(const std::string& str) {
+    size_t b = str.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos){
+    return "";
+    }
+    size_t e = str.find_last_not_of(" \t\r\n");
+    return str.substr(b, e - b + 1);
 }
 
 bool parse_bool(const std::string& v, bool& out) {
@@ -26,7 +28,7 @@ bool parse_bool(const std::string& v, bool& out) {
         out = true;
         return true;
     }
-    if (s == "false" || s == "0" || s == "no" || s == "off") {
+    if (s == "false" || s == "0" || s == "no" || s == "off"){
         out = false;
         return true;
     }
@@ -37,7 +39,8 @@ bool parse_bool(const std::string& v, bool& out) {
 std::vector<std::string> split_args(const std::string& v) {
     std::vector<std::string> out;
     std::string cur;
-    bool in_quotes = false, have = false;
+    bool in_quotes = false;
+    bool have = false;
     for (char c : v) {
         if (c == '"') {
             in_quotes = !in_quotes;
@@ -53,16 +56,19 @@ std::vector<std::string> split_args(const std::string& v) {
             have = true;
         }
     }
-    if (have) out.push_back(cur);
+
+    if(have){
+        out.push_back(cur);
+    }
     return out;
 }
 
 }  // namespace
 
-bool parse_services_file(const std::string& path,
-                         std::vector<ServiceConfig>& out, std::string& err) {
+//parse service file and return if 
+bool parse_services_file(const std::string& path, std::vector<ServiceConfig>& out, std::string& err) {
     std::ifstream f(path);
-    if (!f) {
+    if(!f) {
         err = "cannot open services manifest: " + path;
         return false;
     }
@@ -82,7 +88,7 @@ bool parse_services_file(const std::string& path,
         return false;
     };
 
-    while (std::getline(f, line)) {
+    while(std::getline(f, line)){
         ++lineno;
         std::string t = trim(line);
         if (t.empty() || t[0] == '#' || t[0] == ';') continue;
@@ -122,25 +128,22 @@ bool parse_services_file(const std::string& path,
             if (p <= 0 || p > 65535) return fail("health_tcp port out of range");
             cur->health_port = static_cast<uint16_t>(p);
         } else if (key == "health_interval") {
-            cur->health_interval_sec =
-                static_cast<int>(std::strtol(val.c_str(), nullptr, 10));
+            cur->health_interval_sec = static_cast<int>(std::strtol(val.c_str(), nullptr, 10));
         } else if (key == "backoff_min") {
-            cur->backoff_min_sec =
-                static_cast<int>(std::strtol(val.c_str(), nullptr, 10));
+            cur->backoff_min_sec = static_cast<int>(std::strtol(val.c_str(), nullptr, 10));
         } else if (key == "backoff_max") {
-            cur->backoff_max_sec =
-                static_cast<int>(std::strtol(val.c_str(), nullptr, 10));
+            cur->backoff_max_sec = static_cast<int>(std::strtol(val.c_str(), nullptr, 10));
         } else {
             return fail("unknown key '" + key + "'");
         }
     }
 
-    for (const auto& c : result) {
-        if (c.exec.empty())
+    for(const auto& c : result){
+        if (c.exec.empty()){
             return (err = "service '" + c.name + "' is missing 'exec'", false);
+        }
         if (c.exec.front() != '/')
-            return (err = "service '" + c.name + "' exec must be an absolute path",
-                    false);
+            return (err = "service '" + c.name + "' exec must be an absolute path", false);
     }
 
     out = std::move(result);

@@ -27,7 +27,7 @@ void printBrick(const bool alternate){
 }
 
 //prints castle logo with border, incoming strings are always 
-void printViewWithBrickBorder(const std::string_view view, const bool alternate){
+inline void printViewWithBrickBorder(const std::string_view view, const bool alternate){
     std::string_view wall;
     if(alternate){ //alt wall
         wall = "|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|_|";
@@ -50,10 +50,10 @@ void printViewWithBrickBorder(const std::string_view view, const bool alternate)
 
     } //namespace detail
 
-void printLogo(){
+inline void printLogo(){
     const std::array<std::string_view, 5> castleLogo = {
   "                _   _              ",
-  "   ___ __ _ ___| |_| | ___   _     ",
+ "   ___ __ _ ___| |_| | ___   _     ",
 R"(  / __/ _` / __| __| |/ _ \_| |_   )",
 R"(| (_| (_| \__ \ |_| |  __/_   _| )",
 R"( \___\__,_|___/\__|_|\___| |_|   )",

@@ -23,6 +23,7 @@ class EventLoop;
 class Supervisor;
 
 std::string systemStatusHelper();
+void printTimeReminder();
 
 // Per-backend uptime, failure counts and quarantine state. Takes the supervisor
 // (may be null) rather than reading service state directly: that state lives on
@@ -48,7 +49,10 @@ public:
 private:
     void run();                  // thread body: poll(listen, stop) accept loop
     void handle_client(int cfd);  // blocking line protocol for one admin client
+    // Stamps the local time on top of whatever dispatch_command() produced.
     std::string dispatch(const std::string& line, bool& close_session);
+    // Runs one admin command and returns its reply body (no timestamp).
+    std::string dispatch_command(const std::string& line, bool& close_session);
     std::string cmd_status() const;
     std::string cmd_health();
     std::string cmd_errors();  // new log lines since the last pull

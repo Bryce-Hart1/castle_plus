@@ -227,12 +227,9 @@ int main(int argc, char** argv) {
                 return conn;  // null on rare SSL_new failure -> listener skips
             };
         } else {
-            factory = [&router, timeout, max_body](castle::EventLoop& loop,
-                                                   castle::Socket sock) {
+            factory = [&router, timeout, max_body](castle::EventLoop& loop, castle::Socket sock) {
                 return std::make_unique<castle::HttpConnection>(
-                    loop,
-                    std::make_unique<castle::PlainTransport>(std::move(sock)),
-                    router, timeout, max_body);
+                    loop, std::make_unique<castle::PlainTransport>(std::move(sock)), router, timeout, max_body);
             };
         }
     } else {
@@ -264,7 +261,7 @@ int main(int argc, char** argv) {
 
     // Log the bound address: with IP_FREEBIND a typo'd --bind still "succeeds"
     // and silently receives nothing, so this line is the operator's sanity check.
-    LOG_INFO("castle++ listening on %s:%u with %u worker loop(s) [%s]",
+    LOG_INFO("castle+ listening on %s:%u with %u worker loop(s) [%s]",
              opts.bind_addr.empty() ? "0.0.0.0" : opts.bind_addr.c_str(),
              opts.port, n_threads,
              opts.routes_path.empty() ? "echo"
@@ -349,6 +346,6 @@ int main(int argc, char** argv) {
     for (auto& loop : loops) loop->stop();
     for (auto& w : workers) w.join();
 
-    LOG_INFO("castle++ stopped cleanly");
+    LOG_INFO("castle+ stopped cleanly");
     return 0;
 }

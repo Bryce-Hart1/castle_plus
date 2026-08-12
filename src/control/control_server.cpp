@@ -23,11 +23,13 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "util/clock.hpp"
 #include "util/hardware.hpp"
 
 #include "net/event_loop.h"
 #include "supervisor/supervisor.h"
 #include "util/log.h"
+#include "util/clock.hpp"
 
 namespace castle {
 
@@ -246,6 +248,8 @@ std::string systemStatusHelper() {
 
     return out;
 }
+
+
 // Each backend's runtime, failure count, and most recent failure (if any), plus
 // a callout for anything the failure circuit breaker has quarantined. The
 // rendering itself lives in the Supervisor because that's the thread that owns
@@ -255,7 +259,26 @@ std::string backendStatusHelper(Supervisor* supervisor) {
     return supervisor->describe_backend_status();
 }
 
+
+
+// Every admin reply opens with the local date/time the command was handled, so a
+// session transcript is self-dating — an operator reading back a scrollback (or
+// pasting one into a ticket) can tell when each answer was actually taken.
+// Format matches the LOG_* prefix, so control output and journal lines line up.
+// 24-hour on purpose: this is an ops tool, and AM/PM invites misreading.
 std::string ControlServer::dispatch(const std::string& raw, bool& close_session) {
+    std::string body = dispatch_command(raw, close_session);
+    // A blank line produces no reply at all; don't answer it with a bare clock.
+    if (body.empty()) return body;
+
+    // Local zone where the platform ships a usable tzdb, UTC otherwise — the
+    // clock falls back on its own rather than throwing into the admin thread.
+    const bstd::system::clock clk;
+    return "[" + clk.dateString() + " " +
+           clk.timeLocal(bstd::system::time::hour24) + "]\n" + body;
+}
+
+std::string ControlServer::dispatch_command(const std::string& raw, bool& close_session) {
     // Trim surrounding whitespace; first token is the command.
     size_t b = raw.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) return "";
@@ -383,20 +406,23 @@ std::string ControlServer::cmd_status() const {
 std::string ControlServer::cmd_health() {
     using namespace std::chrono;
 
-    // Claude — Date 06/19/2026
+    // Bryce Hart — Date 06/19/2026
     // The async round-trip in action: hand each loop a task (set a promise),
     // wake it via its eventfd, then wait for the acks. A wedged loop won't
     // fulfil its promise and shows up as a timeout.
+    //change timeout wait time here -
+    const auto waitTimeInMs = 500;
+
     const auto t0 = steady_clock::now();
     std::vector<std::future<void>> futures;
     futures.reserve(loops_.size());
-    for (auto* lp : loops_) {
+    for (auto& lp : loops_) {
         auto prom = std::make_shared<std::promise<void>>();
         futures.push_back(prom->get_future());
         lp->post([prom] { prom->set_value(); });
     }
 
-    const auto deadline = t0 + milliseconds(500);
+    const auto deadline = t0 + milliseconds(waitTimeInMs);
     size_t responded = 0;
     for (auto& f : futures) {
         if (f.wait_until(deadline) == std::future_status::ready) {
@@ -409,12 +435,9 @@ std::string ControlServer::cmd_health() {
         }
     }
 
-    const auto rtt_us =
-        duration_cast<microseconds>(steady_clock::now() - t0).count();
-    char buf[160];
-    std::snprintf(
-        buf, sizeof(buf),
-        "health: %zu/%zu event loops responsive (task round-trip in %lldus)\n",
+    const auto rtt_us = duration_cast<microseconds>(steady_clock::now() - t0).count();
+    char buf[160]; //buffer size
+    std::snprintf( buf, sizeof(buf), "health: %zu/%zu event loops responsive (task round-trip in %lldus)\n",
         responded, loops_.size(), static_cast<long long>(rtt_us));
     return buf;
 }
