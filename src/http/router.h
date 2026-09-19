@@ -18,7 +18,7 @@ struct Backend {
 
 struct Route {
     std::string name;
-    std::string host;              // lowercased; empty = match any Host
+    std::string host;  // lowercased; empty = match any Host
     std::string path_prefix = "/";  // request path must start with this
 
     Backend backend;
@@ -31,8 +31,7 @@ public:
 
     // Pick the backend for (Host header, request path). Most specific (longest
     // path_prefix) wins; a host-specific route beats a wildcard at equal length.
-    std::optional<Backend> match(const std::string& host,
-                                 const std::string& path) const;
+    std::optional<Backend> match(const std::string& host, const std::string& path) const;
 
     size_t size() const { return routes_.size(); }
 

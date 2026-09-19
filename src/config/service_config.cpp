@@ -1,7 +1,7 @@
 // Bryce Hart Aug 12 26
 // Small, strict INI parser for the services manifest. Strict on purpose: a typo
 // in a manifest that launches processes should fail loudly, not silently.
-#include "config/service_config.h"
+#include "../config/service_config.h"
 
 #include <cctype>
 #include <cstdlib>

@@ -67,4 +67,9 @@ private:
 // wg0 is up at boot). Returns an invalid Socket and fills `err` on failure.
 Socket make_reuseport_listener(const std::string& bind_addr, uint16_t port, int backlog, std::string& err);
 
+// Blocking TCP reachability check: true if <host>:<port> (an IPv4 literal, no
+// DNS) accepts a connection within timeout_ms. The connection is closed straight
+// away. Used by the supervisor's backend health checks and the internet watch.
+bool tcp_probe(const std::string& host, uint16_t port, int timeout_ms);
+
 }  // namespace castle

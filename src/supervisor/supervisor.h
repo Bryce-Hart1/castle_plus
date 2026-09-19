@@ -64,9 +64,6 @@ private:
     static void prune_failures(Service& s,
                                std::chrono::steady_clock::time_point now);
 
-    static bool tcp_health_ok(const std::string& host, uint16_t port,
-                              int timeout_ms);
-
     std::vector<Service> services_;
     EventLoop loop_;
     std::thread thread_;

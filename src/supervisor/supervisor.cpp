@@ -5,14 +5,10 @@
 // freely touches services_ without locks.
 #include "supervisor/supervisor.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <signal.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
-#include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -29,6 +25,7 @@
 #include <string>
 
 #include "net/fd_watcher.h"
+#include "net/socket.h"
 #include "util/log.h"
 
 namespace castle {
@@ -326,7 +323,7 @@ void Supervisor::on_tick() {
         if (s.pid > 0 && s.cfg.health_port != 0 &&
             std::chrono::duration_cast<seconds>(now - s.last_health).count() >=
                 s.cfg.health_interval_sec) {
-            bool ok = tcp_health_ok(s.cfg.health_host, s.cfg.health_port, 500);
+            bool ok = tcp_probe(s.cfg.health_host, s.cfg.health_port, 500);
             if (!s.health_known || ok != s.healthy) {
                 LOG_INFO("supervisor: '%s' health %s", s.cfg.name.c_str(),
                          ok ? "up" : "down");
@@ -521,39 +518,6 @@ Service* Supervisor::find_by_name(const std::string& name) {
     for (auto& s : services_)
         if (s.cfg.name == name) return &s;
     return nullptr;
-}
-
-bool Supervisor::tcp_health_ok(const std::string& host, uint16_t port, int timeout_ms){
-
-    int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd < 0){
-        return false;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1){
-        ::close(fd);
-        return false;
-    }
-
-    bool ok = false;
-    int r = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (r == 0) {
-        ok = true;
-    } else if (errno == EINPROGRESS) {
-        pollfd p{fd, POLLOUT, 0};
-        if (::poll(&p, 1, timeout_ms) > 0 && (p.revents & POLLOUT)) {
-            int err = 0;
-            socklen_t len = sizeof(err);
-            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 &&
-                err == 0)
-                ok = true;
-        }
-    }
-    ::close(fd);
-    return ok;
 }
 
 std::string Supervisor::describe_services() {

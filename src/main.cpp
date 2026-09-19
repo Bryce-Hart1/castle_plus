@@ -24,6 +24,7 @@
 #include "http/http_connection.h"
 #include "http/router.h"
 #include "net/conn_limit.h"
+#include "net/connectivity.h"
 #include "net/echo_connection.h"
 #include "net/event_loop.h"
 #include "net/listener.h"
@@ -51,6 +52,7 @@ struct Options {
     size_t max_conn = 0;   // max concurrent client connections (0 = unlimited)
     long rate = 0;         // per-IP connections/sec (0 = rate limiting off)
     long rate_burst = 0;   // token bucket size (0 => defaults to `rate`)
+    int net_check_sec = 30;  // internet probe interval, seconds (0 = off)
 };
 
 void print_usage(const char* prog) {
@@ -76,7 +78,9 @@ void print_usage(const char* prog) {
                  "  --max-conn N    max concurrent connections (0 = unlimited)\n"
                  "  --rate N        per-IP connections/sec, token bucket "
                  "(0 = off)\n"
-                 "  --rate-burst N  token bucket size (default = --rate)\n",
+                 "  --rate-burst N  token bucket size (default = --rate)\n"
+                 "  --net-check N   internet probe interval, seconds; logs "
+                 "CRITICAL on loss (default 30; 0 disables)\n",
                  prog);
 }
 
@@ -120,6 +124,8 @@ bool parse_args(int argc, char** argv, Options& opts) {
             opts.rate = val;
         } else if (arg == "--rate-burst" && next(val) && val >= 0) {
             opts.rate_burst = val;
+        } else if (arg == "--net-check" && next(val) && val >= 0) {
+            opts.net_check_sec = static_cast<int>(val);
         } else if (arg == "--tls-cert") {
             if (i + 1 >= argc) return false;
             opts.tls_cert = argv[++i];
@@ -293,6 +299,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Watch the uplink on its own thread; losing it is logged CRITICAL and shows
+    // up in `systemstatus`.
+    std::unique_ptr<castle::ConnectivityMonitor> net_watch;
+    if (opts.net_check_sec > 0) {
+        net_watch = std::make_unique<castle::ConnectivityMonitor>(
+            std::chrono::seconds(opts.net_check_sec));
+        net_watch->start();
+    }
+
     // Bring up the control plane on its own thread (off the data path). Its
     // `shutdown` command pokes us with SIGTERM, which the sigwait below catches
     // — the exact same clean path as Ctrl-C.
@@ -339,9 +354,11 @@ int main(int argc, char** argv) {
     }
     LOG_INFO("received signal %d, shutting down...", sig);
 
-    // Order: stop admin (no command races teardown), stop the supervisor (it
-    // SIGTERMs then SIGKILLs the backends), then stop the loops and join.
+    // Order: stop admin (no command races teardown), stop the internet watch,
+    // stop the supervisor (it SIGTERMs then SIGKILLs the backends), then stop
+    // the loops and join.
     if (control) control->stop();
+    if (net_watch) net_watch->stop();
     if (supervisor) supervisor->stop();
     for (auto& loop : loops) loop->stop();
     for (auto& w : workers) w.join();

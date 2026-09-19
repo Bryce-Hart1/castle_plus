@@ -26,6 +26,7 @@
 #include "util/clock.hpp"
 #include "util/hardware.hpp"
 
+#include "net/connectivity.h"
 #include "net/event_loop.h"
 #include "supervisor/supervisor.h"
 #include "util/log.h"
@@ -201,6 +202,8 @@ void ControlServer::handle_client(int cfd) {
 // optional: a missing /proc file, or a thermal zone that needs root, reports
 // "unavailable" rather than failing the command. Values are rendered to two
 // decimals — std::to_string gives six, which is noise for a load average.
+// Ends with the internet watch's last result and every CRITICAL line since
+// startup (or "none"), so one command answers "is this box okay?".
 std::string systemStatusHelper() {
     const char* kUnavailable = "unavailable";
 
@@ -245,6 +248,26 @@ std::string systemStatusHelper() {
         out += kUnavailable;
     }
     out += '\n';
+
+    out += "internet:  ";
+    switch (internet_state().load(std::memory_order_relaxed)) {
+        case NetState::Up:      out += "up"; break;
+        case NetState::Down:    out += "DOWN"; break;
+        case NetState::Unknown: out += "not checked"; break;
+    }
+    out += '\n';
+
+    const std::vector<std::string> critical = log_critical_entries();
+    out += "critical:  ";
+    if (critical.empty()) {
+        out += "none\n";
+    } else {
+        out += std::to_string(critical.size()) +
+               (critical.size() == 1 ? " entry\n" : " entries\n");
+        for (const auto& line : critical) {
+            out += "  " + line + '\n';
+        }
+    }
 
     return out;
 }
@@ -302,6 +325,7 @@ std::string ControlServer::dispatch_command(const std::string& raw, bool& close_
     if (cmd == "help") {
         return "commands:\n"
             "  help            this text\n"
+            "  clear           clear off the current screen\n"
             "  ping            liveness check -> pong\n"
             "  status          aggregated counters across all loops\n"
             "  health          probe every loop via the async round-trip\n"
@@ -309,7 +333,7 @@ std::string ControlServer::dispatch_command(const std::string& raw, bool& close_
             "  restart <name>  restart a supervised backend\n"
             "  errors          log lines since the last pull (needs --log-file)\n"
             "  shutdown        gracefully stop castle+\n"
-            "  systemstatus    current system vitals (load, memory, temp)\n"
+            "  systemstatus    system vitals, internet, critical logs\n"
             "  backendstatus   per-backend uptime, failure history, quarantine\n"
             "  exit            close this admin session\n";
     }
@@ -342,6 +366,14 @@ std::string ControlServer::dispatch_command(const std::string& raw, bool& close_
         close_session = true;
         return "bye\n";
     }
+    if (cmd == "clear"){
+        std::string newLines{};
+        const std::size_t clearsize = 150;
+        for(std::size_t i{0}; i < clearsize; i++){
+            newLines.push_back('\n');
+        }
+        return newLines;
+    }
     // bryce hart 7-1-26 - Updated 8-11-26
     // Nothing above matched, so cmd is unknown: offer the closest real command
     // with bstd's autocorrect filter
@@ -350,7 +382,7 @@ std::string ControlServer::dispatch_command(const std::string& raw, bool& close_
     static const bstd::autoCorrectFilter filter(3, {
         "help", "ping", "status", "stats", "health", "errors",
         "services", "backends", "restart", "shutdown", "exit", "quit",
-        "systemstatus", "backendstatus"});
+        "systemstatus", "backendstatus", "clear"});
     // The command string is raw user input; an exception escaping this thread
     // would terminate the whole process, so a failed suggestion must never be
     // worse than no suggestion.

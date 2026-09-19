@@ -2,7 +2,7 @@
 // Non-blocking OpenSSL I/O. Every call can come back WANT_READ or WANT_WRITE
 // regardless of whether we asked to read or write; map_error turns that into the
 // direction the caller should wait on.
-#include "tls/tls_transport.h"
+#include "../tls/tls_transport.h"
 
 namespace castle {
 

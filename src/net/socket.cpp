@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -80,6 +81,33 @@ Socket make_reuseport_listener(const std::string& bind_addr, uint16_t port, int 
     }
 
     return sock;
+}
+
+bool tcp_probe(const std::string& host, uint16_t port, int timeout_ms){
+    // Non-blocking connect so the wait is bounded by timeout_ms rather than the
+    // kernel's SYN retry schedule (which can run past a minute).
+    Socket sock(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0));
+    if (!sock.valid()){
+        return false;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1){
+        return false;
+    }
+
+    int r = ::connect(sock.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (r == 0) return true;
+    if (errno != EINPROGRESS) return false;
+
+    pollfd p{sock.get(), POLLOUT, 0};
+    if (::poll(&p, 1, timeout_ms) <= 0 || !(p.revents & POLLOUT)) return false;
+
+    int err = 0;
+    socklen_t len = sizeof(err);
+    return ::getsockopt(sock.get(), SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0;
 }
 
 }  // namespace castle

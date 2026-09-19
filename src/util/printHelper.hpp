@@ -18,7 +18,7 @@ namespace printHelper{
 
     namespace detail{
 //prints brick design
-void printBrick(const bool alternate){
+inline void printBrick(const bool alternate){
     if(alternate){
         std::cout << "|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|_|" << std::endl;
     }else{

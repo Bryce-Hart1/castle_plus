@@ -125,7 +125,7 @@ its own thread, off the data path.
 | `health` | probe every event loop via the async task round-trip |
 | `services` | supervised backends: state / pid / health / restarts |
 | `backendstatus` | per-backend uptime, failure history, quarantine details |
-| `systemstatus` | host vitals: threads, load, CPU temp, memory |
+| `systemstatus` | host vitals: threads, load, CPU temp, memory, internet, critical log entries |
 | `restart <name>` | restart a backend (and clear its quarantine) |
 | `errors` | log lines since the last pull |
 | `shutdown` | graceful stop |
@@ -152,6 +152,13 @@ PERMANENTLY DOWN — not being restarted:
 Everything goes to stderr (journald / OpenRC log files pick it up). `--log-file`
 additionally mirrors WARN and ERROR into a file that the `errors` command reads
 back **incrementally** — each pull returns only what's new since the last one.
+
+CRITICAL is reserved for host-level trouble. AKA, losing the internet.
+A watcher thread TCP-probes `1.1.1.1:443` and `8.8.8.8:443` every `--net-check`
+seconds and logs one CRITICAL line when both stop answering (and an INFO line
+when the link returns). The last 50 CRITICAL lines are kept in memory and shown
+by `systemstatus` (or `critical:  none`), log file or not; with `--log-file`
+they are also mirrored there as `HIGH: CRITICAL: ...`.
 
 ---
 
@@ -273,10 +280,11 @@ the supervisor's backends are children in the same cgroup, systemd's default
 --tls-cert PATH  PEM certificate (with --tls-key => HTTPS)
 --tls-key PATH   PEM private key
 --max-body N     max request body bytes (default 1 GiB; 0 = unlimited)
---log-file PATH  mirror WARN/ERROR to this file
+--log-file PATH  mirror WARN/ERROR/CRITICAL to this file
 --max-conn N     max concurrent connections (0 = unlimited)
 --rate N         per-IP connections/sec, token bucket (0 = off)
 --rate-burst N   token bucket size (default = --rate)
+--net-check N    internet probe interval, seconds (default 30; 0 disables)
 ```
 
 ---

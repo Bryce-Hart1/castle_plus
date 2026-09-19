@@ -5,27 +5,36 @@
 // --log-file. That logger isn't thread-safe and can throw, so we only ever
 // touch it under log_mutex() and inside try/catch: a logging failure degrades
 // to stderr-only, it never takes down the server.
+// CRITICAL is for "the box itself is in trouble" (e.g. the internet is gone).
+// Those lines are additionally kept in memory — last kMaxCriticalEntries — so
+// `systemstatus` can show them even when --log-file is off.
 #pragma once
 
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <ctime>
+#include <deque>
 #include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
-#include "util/log.hpp"  // bstd::store::Logger + IndexedFileReader
+#include "../util/log.hpp"  // bstd::store::Logger + IndexedFileReader
 
 namespace castle {
 
 enum class LogLevel {
-    Info,   // information
-    Warn,   // warnings
-    Error   // errors
+    Info,     // information
+    Warn,     // warnings
+    Error,    // errors
+    Critical  // host-level trouble; also kept in memory for systemstatus
 };
+
+// How many CRITICAL lines the in-memory history keeps (oldest dropped first).
+constexpr std::size_t kMaxCriticalEntries = 50;
+
 // Single mutex so interleaved lines from the per-core worker threads don't
 // shred each other — and so the (non-thread-safe) file Logger is only ever
 // touched by one thread at a time. Cheap; logging is not on the hot path.
@@ -55,6 +64,22 @@ inline std::unique_ptr<bstd::store::IndexedFileReader>& log_reader() {
 inline std::size_t& log_cursor() {
     static std::size_t cursor = 0;
     return cursor;
+}
+
+// Every CRITICAL line since startup ("[timestamp] message"), capped at
+// kMaxCriticalEntries. In-memory (resets on restart). Only touched under
+// log_mutex().
+inline std::deque<std::string>& critical_log() {
+    static std::deque<std::string> entries;
+    return entries;
+}
+
+// Copy of the CRITICAL history, oldest first. Unlike log_pull_new() this does
+// not consume anything — every call returns the full history. Thread-safe.
+inline std::vector<std::string> log_critical_entries() {
+    std::lock_guard<std::mutex> lock(log_mutex());
+    const auto& entries = critical_log();
+    return std::vector<std::string>(entries.begin(), entries.end());
 }
 
 // Turn on file logging to `path` (WARN/ERROR are mirrored there). Call once from
@@ -99,6 +124,7 @@ inline const char* level_tag(LogLevel l) {
         case LogLevel::Info:  return "[INFO]~";
         case LogLevel::Warn:  return "[WARN]~";
         case LogLevel::Error: return "[ERROR]~";
+        case LogLevel::Critical: return "[CRIT]~";
     }
     return "?";
 }
@@ -120,12 +146,25 @@ inline void log_msg(LogLevel level, const char* fmt, ...) {
     std::lock_guard<std::mutex> lock(log_mutex());
     std::fprintf(stderr, "[%s] %-5s %s\n", ts, level_tag(level), msg);
 
-    // Mirror WARN/ERROR into the file logger (Warn->WARNING, Error->HIGH).
+    if (level == LogLevel::Critical) {
+        auto& entries = critical_log();
+        entries.push_back(std::string("[") + ts + "] " + msg);
+        if (entries.size() > kMaxCriticalEntries) entries.pop_front();
+    }
+
+    // Mirror WARN/ERROR/CRITICAL into the file logger (Warn->WARNING,
+    // Error->HIGH, Critical->HIGH). bstd's Logger tops out at HIGH, so critical
+    // lines carry a "CRITICAL: " prefix to stay distinguishable in `errors`.
     if (level != LogLevel::Info && file_logger()) {
         try {
-            file_logger()->write(msg, level == LogLevel::Error
-                ? bstd::store::Logger::HIGH //high
-                : bstd::store::Logger::WARNING); //else warning
+            if (level == LogLevel::Critical) {
+                file_logger()->write(std::string("CRITICAL: ") + msg,
+                                     bstd::store::Logger::HIGH);
+            } else {
+                file_logger()->write(msg, level == LogLevel::Error
+                    ? bstd::store::Logger::HIGH //high
+                    : bstd::store::Logger::WARNING); //else warning
+            }
         }catch(const std::exception& e){
             std::fprintf(stderr, "[log] file write failed (%s)\n", e.what());
         }
@@ -137,3 +176,4 @@ inline void log_msg(LogLevel level, const char* fmt, ...) {
 #define LOG_INFO(...)  ::castle::log_msg(::castle::LogLevel::Info, __VA_ARGS__)
 #define LOG_WARN(...)  ::castle::log_msg(::castle::LogLevel::Warn, __VA_ARGS__)
 #define LOG_ERROR(...) ::castle::log_msg(::castle::LogLevel::Error, __VA_ARGS__)
+#define LOG_CRITICAL(...) ::castle::log_msg(::castle::LogLevel::Critical, __VA_ARGS__)

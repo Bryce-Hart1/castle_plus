@@ -21,6 +21,7 @@ add_executable(castle
   src/net/socket.cpp
   src/net/event_loop.cpp
   src/net/listener.cpp
+  src/net/connectivity.cpp
   src/net/echo_connection.cpp
   src/control/control_server.cpp
   src/config/service_config.cpp
