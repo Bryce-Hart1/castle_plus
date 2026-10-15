@@ -6,11 +6,15 @@
 // locks. The control plane reaches it through EventLoop::post() (describe /
 // restart), exactly the async round-trip pattern from the control milestone.
 //
+// One deliberate exception: a small mutex-guarded uptime snapshot, so the HTTP
+// worker loops can answer /_castle/uptime without blocking on a posted task.
+//
 // Lifetime hierarchy: systemd -> castle++ -> these backends. On shutdown the
 // supervisor SIGTERMs its children, waits a grace period, then SIGKILLs.
 #pragma once
 
 #include <chrono>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,6 +44,15 @@ public:
     std::string describe_backend_status();
     bool restart_service(const std::string& name);
 
+    // Per-service start instant for /_castle/uptime. Safe from any thread and
+    // never waits on the supervisor loop — just a brief lock and a copy.
+    struct ServiceUptime {
+        std::string name;
+        bool running = false;
+        std::chrono::steady_clock::time_point since{};  // last spawn
+    };
+    std::vector<ServiceUptime> uptime_snapshot() const;
+
 private:
     // ---- all of the following run ON the supervisor thread ----
     void on_sigchld();          // reap + decide restart
@@ -53,6 +66,8 @@ private:
     std::string render_backend_status() const;
     Service* find_by_pid(pid_t pid);
     Service* find_by_name(const std::string& name);
+    // Mirror s's running/start into the uptime snapshot (call after pid changes).
+    void publish_uptime(const Service& s);
 
     // ---- failure accounting / circuit breaker ----
     // Record one unexpected exit (`status` as returned by waitpid) against `s`.
@@ -65,6 +80,8 @@ private:
                                std::chrono::steady_clock::time_point now);
 
     std::vector<Service> services_;
+    mutable std::mutex uptime_mu_;
+    std::vector<ServiceUptime> uptime_;  // index-parallel to services_
     EventLoop loop_;
     std::thread thread_;
 

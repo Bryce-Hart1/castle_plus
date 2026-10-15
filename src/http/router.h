@@ -34,6 +34,7 @@ public:
     std::optional<Backend> match(const std::string& host, const std::string& path) const;
 
     size_t size() const { return routes_.size(); }
+    const std::vector<Route>& routes() const { return routes_; }
 
 private:
     std::vector<Route> routes_;

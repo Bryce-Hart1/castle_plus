@@ -27,51 +27,36 @@
 #include "net/fd_watcher.h"
 #include "net/socket.h"
 #include "util/log.h"
+#include "util/uptime.hpp"
 
 namespace castle {
 
 using std::chrono::seconds;
 using std::chrono::steady_clock;
 
-namespace {
-
-// Compact, human-scannable duration. Resolution drops as the span grows — at two
-// hours nobody cares about the seconds, and the column stays narrow.
-std::string human_duration(long long secs) {
-    if (secs < 0) secs = 0;
-    char buf[32];
-    if (secs < 60) {
-        std::snprintf(buf, sizeof(buf), "%llds", secs);
-    } else if (secs < 3600) {
-        std::snprintf(buf, sizeof(buf), "%lldm %02llds", secs / 60, secs % 60);
-    } else if (secs < 86400) {
-        std::snprintf(buf, sizeof(buf), "%lldh %02lldm", secs / 3600,
-                      (secs % 3600) / 60);
-    } else {
-        std::snprintf(buf, sizeof(buf), "%lldd %02lldh", secs / 86400,
-                      (secs % 86400) / 3600);
-    }
-    return buf;
-}
-
-std::string wall_timestamp(std::chrono::system_clock::time_point tp) {
-    const std::time_t t = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm_buf{};
-    ::localtime_r(&t, &tm_buf);
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-    return buf;
-}
-
-}  // namespace
-
 Supervisor::Supervisor(std::vector<ServiceConfig> configs) {
     services_.reserve(configs.size());
+    uptime_.reserve(configs.size());
     for (auto& c : configs) {
         Service s;
         s.cfg = std::move(c);
+        ServiceUptime u;
+        u.name = s.cfg.name;
+        uptime_.push_back(std::move(u));
         services_.push_back(std::move(s));
     }
+}
+
+void Supervisor::publish_uptime(const Service& s) {
+    const auto i = static_cast<std::size_t>(&s - services_.data());
+    std::lock_guard<std::mutex> lock(uptime_mu_);
+    uptime_[i].running = s.pid > 0;
+    uptime_[i].since = s.last_start;
+}
+
+std::vector<Supervisor::ServiceUptime> Supervisor::uptime_snapshot() const {
+    std::lock_guard<std::mutex> lock(uptime_mu_);
+    return uptime_;
 }
 
 Supervisor::~Supervisor() { stop(); }
@@ -166,6 +151,7 @@ void Supervisor::spawn(Service& s) {
     s.state = ServiceState::Running;
     s.is_down = false;  // running again: the outage window is closed
     s.last_start = steady_clock::now();
+    publish_uptime(s);
     LOG_INFO("supervisor: launched '%s' (pid %d)", s.cfg.name.c_str(), pid);
 }
 
@@ -249,6 +235,7 @@ void Supervisor::on_sigchld() {
         Service* s = find_by_pid(pid);
         if (!s) continue;  // unknown child, but it's reaped (no zombie)
         s->pid = -1;
+        publish_uptime(*s);
 
         if (WIFEXITED(status)) {
             LOG_INFO("supervisor: '%s' exited (code %d)", s->cfg.name.c_str(),

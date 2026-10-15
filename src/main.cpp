@@ -33,6 +33,7 @@
 #include "supervisor/supervisor.h"
 #include "tls/tls_context.h"
 #include "util/log.h"
+#include "util/uptime.hpp"
 #include "util/printHelper.hpp" //for print function at startup
 
 namespace {
@@ -153,6 +154,9 @@ std::unique_ptr<castle::EventHandler> make_echo(castle::EventLoop& loop, castle:
 
 
 int main(int argc, char** argv) {
+    // Stamp castle's start instant for /_castle/uptime before anything else.
+    castle::process_start();
+    castle::process_start_wall();
     printHelper::printLogo();
     Options opts;
     if (!parse_args(argc, argv, opts)) {
@@ -191,6 +195,25 @@ int main(int argc, char** argv) {
     sigaddset(&block_mask, SIGCHLD);
     pthread_sigmask(SIG_BLOCK, &block_mask, nullptr);
 
+    // Start the process supervisor (its own EventLoop thread) if a manifest was
+    // given. It launches and babysits the app backends. Started before the
+    // listeners so the HTTP factories can hand it to /_castle/uptime.
+    std::unique_ptr<castle::Supervisor> supervisor;
+    if (!opts.services_path.empty()) {
+        std::vector<castle::ServiceConfig> configs;
+        std::string err;
+        if (!castle::parse_services_file(opts.services_path, configs, err)) {
+            LOG_ERROR("services manifest: %s", err.c_str());
+            return 1;
+        }
+        supervisor = std::make_unique<castle::Supervisor>(std::move(configs));
+        if (!supervisor->start()) {
+            LOG_ERROR("supervisor failed to start");
+            supervisor.reset();
+        }
+    }
+    const castle::Supervisor* sup = supervisor.get();
+
     // Choose what the listeners speak: HTTP reverse proxy when routes are given,
     // otherwise the echo server. `router` is immutable after load(), so every
     // loop shares it by const reference with no locking; it must outlive the
@@ -223,19 +246,20 @@ int main(int argc, char** argv) {
         auto timeout = std::chrono::seconds(opts.timeout_sec);
         size_t max_body = opts.max_body;
         if (tls_enabled) {
-            factory = [&router, &tlsctx, timeout, max_body](
+            factory = [&router, &tlsctx, timeout, max_body, sup](
                           castle::EventLoop& loop, castle::Socket sock) {
                 std::unique_ptr<castle::HttpConnection> conn;
                 auto transport = tlsctx.wrap(std::move(sock));  // TLS-wrap the fd
                 if (transport)
                     conn = std::make_unique<castle::HttpConnection>(
-                        loop, std::move(transport), router, timeout, max_body);
+                        loop, std::move(transport), router, timeout, max_body,
+                        sup);
                 return conn;  // null on rare SSL_new failure -> listener skips
             };
         } else {
-            factory = [&router, timeout, max_body](castle::EventLoop& loop, castle::Socket sock) {
+            factory = [&router, timeout, max_body, sup](castle::EventLoop& loop, castle::Socket sock) {
                 return std::make_unique<castle::HttpConnection>(
-                    loop, std::make_unique<castle::PlainTransport>(std::move(sock)), router, timeout, max_body);
+                    loop, std::make_unique<castle::PlainTransport>(std::move(sock)), router, timeout, max_body, sup);
             };
         }
     } else {
@@ -278,25 +302,6 @@ int main(int argc, char** argv) {
     for (unsigned i = 0; i < n_threads; ++i) {
         castle::EventLoop* lp = loops[i].get();
         workers.emplace_back([lp] { lp->run(); });
-    }
-
-    // Start the process supervisor (its own EventLoop thread) if a manifest was
-    // given. It launches and babysits the app backends.
-    std::unique_ptr<castle::Supervisor> supervisor;
-    if (!opts.services_path.empty()) {
-        std::vector<castle::ServiceConfig> configs;
-        std::string err;
-        if (!castle::parse_services_file(opts.services_path, configs, err)) {
-            LOG_ERROR("services manifest: %s", err.c_str());
-            for (auto& loop : loops) loop->stop();
-            for (auto& w : workers) w.join();
-            return 1;
-        }
-        supervisor = std::make_unique<castle::Supervisor>(std::move(configs));
-        if (!supervisor->start()) {
-            LOG_ERROR("supervisor failed to start");
-            supervisor.reset();
-        }
     }
 
     // Watch the uplink on its own thread; losing it is logged CRITICAL and shows

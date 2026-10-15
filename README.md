@@ -155,6 +155,33 @@ PERMANENTLY DOWN — not being restarted:
       recover with: restart flaky
 ```
 
+### HTTP status endpoints
+
+In proxy mode castle answers two paths itself, on any `Host`, before routing —
+so an outside uptime monitor (or `curl` from your phone) can tell you when the
+box is down. The `/_castle/` prefix is reserved and never proxied.
+
+| path | what it returns |
+|---|---|
+| `GET /_castle/health` | `200` if every routed backend accepts a TCP connect right now, `503` if any doesn't |
+| `GET /_castle/uptime` | castle's uptime + start time, and each supervised backend's uptime (or `down`) |
+
+Uptime isn't a running timer: castle stamps a start instant (at startup, and
+for each backend at spawn) and subtracts it from now on each request. Bodies
+name routes and services only, never backend addresses.
+
+```text
+$ curl -i https://example.com/_castle/health
+HTTP/1.1 200 OK
+castle: up
+web: up
+
+$ curl https://example.com/_castle/uptime
+castle: 7980s (2h 13m) since 2026-10-15 09:12:03
+web: 7975s (2h 12m)
+flaky: down
+```
+
 ### Logging
 
 Everything goes to stderr (journald / OpenRC log files pick it up). `--log-file`

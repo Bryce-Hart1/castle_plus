@@ -18,13 +18,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "http/backend_connection.h"
 #include "net/conn_limit.h"
 #include "net/event_loop.h"
 #include "net/socket.h"
+#include "supervisor/supervisor.h"
 #include "third_party/picohttpparser/picohttpparser.h"
 #include "util/log.h"
+#include "util/uptime.hpp"
 
 namespace castle {
 
@@ -32,6 +35,16 @@ namespace {
 
 constexpr size_t kMaxHead = 32 * 1024;  // request head cap -> 431
 constexpr size_t kMaxHeaders = 100;
+
+// castle's own status paths live under this prefix; it is reserved on every
+// Host and never proxied.
+constexpr char kInternalPrefix[] = "/_castle/";
+
+// /_castle/health probes run inline on this worker loop (tcp_probe blocks).
+// Against 127.0.0.1 backends a connect succeeds or is refused at once, so it
+// costs microseconds; the cap only bites for a remote, blackholed backend,
+// which then stalls this one loop for at most this long per backend.
+constexpr int kInternalProbeMs = 200;
 
 bool iequals(const char* a, size_t alen, const char* b) {
     size_t blen = std::strlen(b);
@@ -70,8 +83,9 @@ bool parse_content_length(const char* v, size_t len, long& out) {
 
 }  // namespace
 
-HttpConnection::HttpConnection(EventLoop& loop, std::unique_ptr<Transport> transport, const Router& router, std::chrono::seconds timeout, size_t max_body)
-: loop_(loop), transport_(std::move(transport)), router_(router), timeout_(timeout), max_body_(max_body), last_activity_(std::chrono::steady_clock::now()),
+HttpConnection::HttpConnection(EventLoop& loop, std::unique_ptr<Transport> transport, const Router& router, std::chrono::seconds timeout, size_t max_body,
+const Supervisor* supervisor)
+: loop_(loop), transport_(std::move(transport)), router_(router), supervisor_(supervisor), timeout_(timeout), max_body_(max_body), last_activity_(std::chrono::steady_clock::now()),
 interest_(EPOLLIN | EPOLLET) {  // matches how the listener registered us
     active_conn_count().fetch_add(1, std::memory_order_relaxed);  // global cap
     loop_.stats().active_connections.fetch_add(1, std::memory_order_relaxed);
@@ -261,6 +275,18 @@ void HttpConnection::process_head() {
     }
     head_len_ = static_cast<size_t>(pret);
 
+    // castle's own status endpoints: answered right here, before any header
+    // handling or routing, on any Host.
+    constexpr size_t kPrefixLen = sizeof(kInternalPrefix) - 1;
+    if (path_len >= kPrefixLen &&
+        std::memcmp(path, kInternalPrefix, kPrefixLen) == 0) {
+        std::string target(path, path_len);
+        size_t q = target.find('?');
+        if (q != std::string::npos) target.resize(q);
+        handle_internal(std::string(method, method_len), target);
+        return;
+    }
+
     std::string host;
     long content_length = 0;
     bool saw_content_length = false;
@@ -423,15 +449,103 @@ void HttpConnection::on_backend_error(const char* why) {
         close_both();  // headers already sent; nothing graceful to do
 }
 
+// ---------------------------------------------------------------------------
+// castle's own status endpoints. Uptime is never a running timer: it's now()
+// minus a start instant stamped once (castle at startup, a backend at spawn).
+// Bodies name routes/services only — never backend addresses — since this is
+// served on the public listener.
+// ---------------------------------------------------------------------------
+void HttpConnection::handle_internal(const std::string& method,
+                                     const std::string& path) {
+    const bool head_only = method == "HEAD";
+    if (method != "GET" && !head_only) {
+        send_response(405, "Method Not Allowed", "use GET or HEAD\n");
+        return;
+    }
+
+    if (path == "/_castle/health") {
+        bool all_up = true;
+        std::string body = render_health(all_up);
+        if (all_up)
+            send_response(200, "OK", body, head_only);
+        else
+            send_response(503, "Service Unavailable", body, head_only);
+    } else if (path == "/_castle/uptime") {
+        send_response(200, "OK", render_uptime(), head_only);
+    } else {
+        send_response(404, "Not Found", "unknown castle endpoint\n", head_only);
+    }
+}
+
+// Live reachability: a fresh TCP connect to each distinct backend, not the
+// supervisor's cached health flag. castle answering at all proves castle is up.
+std::string HttpConnection::render_health(bool& all_up) const {
+    std::string out = "castle: up\n";
+    all_up = true;
+
+    std::vector<const Backend*> probed;
+    for (const auto& r : router_.routes()) {
+        // Several routes can share a backend; probe (and list) it once.
+        bool dup = false;
+        for (const Backend* b : probed) {
+            if (b->host == r.backend.host && b->port == r.backend.port) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+        probed.push_back(&r.backend);
+
+        const bool up = tcp_probe(r.backend.host, r.backend.port, kInternalProbeMs);
+        if (!up) all_up = false;
+        out += r.name;
+        out += up ? ": up\n" : ": DOWN\n";
+    }
+    return out;
+}
+
+std::string HttpConnection::render_uptime() const {
+    using std::chrono::duration_cast;
+    using std::chrono::seconds;
+    const auto now = std::chrono::steady_clock::now();
+
+    auto line = [](const std::string& name, long long secs) {
+        return name + ": " + std::to_string(secs) + "s (" +
+               human_duration(secs) + ")";
+    };
+
+    const long long castle_secs =
+        duration_cast<seconds>(now - process_start()).count();
+    std::string out = line("castle", castle_secs) + " since " +
+                      wall_timestamp(process_start_wall()) + "\n";
+
+    if (supervisor_) {
+        for (const auto& s : supervisor_->uptime_snapshot()) {
+            if (!s.running) {
+                out += s.name + ": down\n";
+                continue;
+            }
+            out += line(s.name, duration_cast<seconds>(now - s.since).count());
+            out += '\n';
+        }
+    }
+    return out;
+}
+
 void HttpConnection::send_error(int code, const char* status, const char* body) {
+    send_response(code, status, body);
+}
+
+void HttpConnection::send_response(int code, const char* status,
+                                   const std::string& body, bool head_only) {
     char head[192];
-    int blen = static_cast<int>(std::strlen(body));
     std::snprintf(head, sizeof(head),
                   "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\n"
-                  "Content-Length: %d\r\nConnection: close\r\n\r\n",
-                  code, status, blen);
+                  "Content-Length: %zu\r\nCache-Control: no-store\r\n"
+                  "Connection: close\r\n\r\n",
+                  code, status, body.size());
     out_ = head;
-    out_ += body;
+    if (!head_only) out_ += body;
     responded_ = true;
     state_ = State::Closing;
     write_block_ = pump_write();

@@ -31,12 +31,13 @@ namespace castle {
 
 class EventLoop;
 class BackendConnection;
+class Supervisor;
 
 class HttpConnection : public EventHandler {
 public:
     HttpConnection(EventLoop& loop, std::unique_ptr<Transport> transport,
                    const Router& router, std::chrono::seconds timeout,
-                   size_t max_body);
+                   size_t max_body, const Supervisor* supervisor = nullptr);
     ~HttpConnection() override;
 
     int fd() const override { return transport_->fd(); }
@@ -71,12 +72,20 @@ private:
     void forward_body(const char* data, size_t n);  // stream body -> backend
     void start_backend();      // non-blocking connect + BackendConnection
     void send_error(int code, const char* status, const char* body);
+    void send_response(int code, const char* status, const std::string& body,
+                       bool head_only = false);
+    // castle's own status paths (/_castle/health, /_castle/uptime), answered
+    // here instead of being routed to a backend.
+    void handle_internal(const std::string& method, const std::string& path);
+    std::string render_health(bool& all_up) const;
+    std::string render_uptime() const;
     void close_both();
     void touch() { last_activity_ = std::chrono::steady_clock::now(); }
 
     EventLoop& loop_;
     std::unique_ptr<Transport> transport_;
     const Router& router_;
+    const Supervisor* supervisor_;  // null when castle runs without --services
     BackendConnection* backend_ = nullptr;
     std::chrono::seconds timeout_;
     size_t max_body_;         // Content-Length cap (0 = unlimited) -> 413
