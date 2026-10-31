@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026
+// Claude — Date 06/19/2026 last changed: 10/31/2026 by: Claude
 // Routes parser + matcher. Same small strict INI style as the services manifest.
 #include "http/router.h"
 
@@ -23,7 +23,36 @@ std::string lower(std::string s) {
     return s;
 }
 
+// Strict size: digits, then an optional K/M/G (binary) suffix. "0" = unlimited.
+bool parse_size(const std::string& v, size_t& out) {
+    if (v.empty()) return false;
+    size_t digits = 0;
+    while (digits < v.size() && v[digits] >= '0' && v[digits] <= '9') ++digits;
+    if (digits == 0 || digits > 15) return false;
+    size_t n = 0;
+    for (size_t i = 0; i < digits; ++i) n = n * 10 + static_cast<size_t>(v[i] - '0');
+    std::string suffix = lower(v.substr(digits));
+    if (suffix == "k") {
+        n <<= 10;
+    } else if (suffix == "m") {
+        n <<= 20;
+    } else if (suffix == "g") {
+        n <<= 30;
+    } else if (!suffix.empty()) {
+        return false;
+    }
+    out = n;
+    return true;
+}
+
 }  // namespace
+
+bool Route::allows(const std::string& path) const {
+    if (allow.empty()) return true;
+    for (const auto& prefix : allow)
+        if (path.rfind(prefix, 0) == 0) return true;  // starts_with
+    return false;
+}
 
 bool Router::load(const std::string& path, std::string& err) {
     std::ifstream f(path);
@@ -83,6 +112,31 @@ bool Router::load(const std::string& path, std::string& err) {
             long p = std::strtol(val.substr(colon + 1).c_str(), nullptr, 10);
             if (p <= 0 || p > 65535) return fail("backend port out of range");
             cur->backend.port = static_cast<uint16_t>(p);
+        } else if (key == "max_body") {
+            size_t n = 0;
+            if (!parse_size(val, n))
+                return fail("max_body must be bytes, optionally with K/M/G");
+            cur->max_body = n;
+        } else if (key == "allow") {
+            cur->allow.clear();
+            size_t i = 0;
+            while (i < val.size()) {
+                size_t b = val.find_first_not_of(" \t", i);
+                if (b == std::string::npos) break;
+                size_t e = val.find_first_of(" \t", b);
+                if (e == std::string::npos) e = val.size();
+                std::string prefix = val.substr(b, e - b);
+                if (prefix.front() != '/')
+                    return fail("allow prefixes must start with '/'");
+                cur->allow.push_back(prefix);
+                i = e;
+            }
+            if (cur->allow.empty()) return fail("allow needs at least one prefix");
+        } else if (key == "auth") {
+            auto tokens = std::make_shared<TokenSet>();
+            std::string terr;
+            if (!tokens->load(val, terr)) return fail(terr);
+            cur->auth = std::move(tokens);
         } else {
             return fail("unknown key '" + key + "'");
         }
@@ -98,8 +152,8 @@ bool Router::load(const std::string& path, std::string& err) {
     return true;
 }
 
-std::optional<Backend> Router::match(const std::string& host,
-                                     const std::string& path) const {
+const Route* Router::match(const std::string& host,
+                           const std::string& path) const {
     // Normalize the Host header: drop any :port, lowercase.
     std::string h = host;
     size_t colon = h.find(':');
@@ -117,8 +171,22 @@ std::optional<Backend> Router::match(const std::string& host,
         }
     }
 
-    if (best) return best->backend;
-    return std::nullopt;
+    return best;
+}
+
+bool Router::reload_auth(std::string& err) const {
+    bool ok = true;
+    err.clear();
+    for (const auto& r : routes_) {
+        if (!r.auth) continue;
+        std::string terr;
+        if (!r.auth->reload(terr)) {
+            if (!err.empty()) err += "; ";
+            err += terr;
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 }  // namespace castle

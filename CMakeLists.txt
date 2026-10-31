@@ -33,6 +33,7 @@ add_executable(castle
   src/tls/tls_context.cpp
   src/tls/tls_transport.cpp
   src/gateway/rate_limiter.cpp
+  src/gateway/auth.cpp
   third_party/picohttpparser/picohttpparser.c
 )
 

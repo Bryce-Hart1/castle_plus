@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026 last changed: 07/04/2026 by: Claude
+// Claude — Date 06/19/2026 last changed: 10/31/2026 by: Claude
 // The client half of a proxied request. Flow: (TLS handshake if any) -> read +
 // parse the request head (picohttpparser), route by Host/path, open the backend
 // and forward a rewritten head, then STREAM the request body through as it
@@ -12,6 +12,9 @@
 // Bounded memory in both directions via backpressure: pause our client reads
 // while the backend's send buffer is full (uploads), and pause the backend's
 // reads while our client send buffer is full (downloads).
+//
+// Per-route policy (allowlist, credential, body cap) is applied to the head
+// before a backend is ever contacted; a refused request never reaches it.
 //
 // Scope: one request per client connection (no keep-alive / pooling yet), with a
 // configurable max body + idle timeouts. Chunked request bodies are still 501.
@@ -72,8 +75,10 @@ private:
     void forward_body(const char* data, size_t n);  // stream body -> backend
     void start_backend();      // non-blocking connect + BackendConnection
     void send_error(int code, const char* status, const char* body);
+    // extra_headers: complete "Name: value\r\n" lines, or null.
     void send_response(int code, const char* status, const std::string& body,
-                       bool head_only = false);
+                       bool head_only = false,
+                       const char* extra_headers = nullptr);
     // castle's own status paths (/_castle/health, /_castle/uptime), answered
     // here instead of being routed to a backend.
     void handle_internal(const std::string& method, const std::string& path);
@@ -105,6 +110,9 @@ private:
     bool client_eof_ = false;    // client half-closed; response still owed to it
     bool read_paused_ = false;   // our client reads paused (upload backpressure)
     bool backend_paused_ = false;  // we paused the backend (download backpressure)
+    bool linger_ = false;        // after an early error: drain the body, then close
+    size_t lingered_ = 0;        // body bytes discarded while lingering
+    std::chrono::steady_clock::time_point linger_deadline_{};
     uint32_t interest_ = 0;    // current epoll interest (avoid redundant updates)
     IoStatus read_block_ = IoStatus::WouldBlockRead;   // last read-side block dir
     IoStatus write_block_ = IoStatus::Ok;              // last write-side block dir

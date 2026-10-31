@@ -332,7 +332,7 @@ int main(int argc, char** argv) {
     }
 
     // Park until someone asks us to quit (Ctrl-C, SIGTERM, `shutdown`) or to
-    // reload the TLS cert (SIGHUP / `systemctl reload`). SIGHUP loops; the
+    // reload the TLS cert + route tokens (SIGHUP / `systemctl reload`). SIGHUP loops; the
     // others fall through to shutdown.
     sigset_t wait_mask;
     sigemptyset(&wait_mask);
@@ -353,6 +353,14 @@ int main(int argc, char** argv) {
             } else {
                 LOG_INFO("SIGHUP: no TLS cert configured; nothing to reload");
             }
+            // Route token files too, so a revoked credential stops working
+            // without a restart (which would also bounce every backend).
+            std::string aerr;
+            if (router.reload_auth(aerr))
+                LOG_INFO("SIGHUP: reloaded route token files");
+            else
+                LOG_ERROR("SIGHUP: token reload failed (keeping current): %s",
+                          aerr.c_str());
             continue;
         }
         break;  // SIGINT / SIGTERM

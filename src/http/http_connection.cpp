@@ -1,4 +1,4 @@
-// Claude — Date 06/19/2026 last changed: 07/04/2026 by: Claude
+// Claude — Date 06/19/2026 last changed: 10/31/2026 by: Claude
 // Client-side proxy implementation, transport-agnostic (plaintext or TLS).
 // Request bodies are streamed to the backend as they arrive (no whole-body
 // buffering), with backpressure in both directions so large uploads/downloads
@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
@@ -45,6 +46,36 @@ constexpr char kInternalPrefix[] = "/_castle/";
 // costs microseconds; the cap only bites for a remote, blackholed backend,
 // which then stalls this one loop for at most this long per backend.
 constexpr int kInternalProbeMs = 200;
+
+// After answering an error before the request body was read, keep reading (and
+// discarding) for a bit before closing. Closing with unread bytes in the socket
+// makes the kernel send RST, and the client can lose the response it was owed.
+constexpr size_t kLingerMaxBytes = 1024 * 1024;
+constexpr auto kLingerTime = std::chrono::seconds(2);
+
+// The challenge that makes a browser prompt for the vault token. Bearer
+// clients send their header up front and never see it.
+constexpr char kAuthChallenge[] =
+    "WWW-Authenticate: Basic realm=\"castle\", charset=\"UTF-8\"\r\n";
+
+// Rejected-credential WARNs, at most one per second process-wide, so a
+// scanner can't flood the log file. The count of dropped lines rides along.
+void warn_auth(const std::string& route, const char* why) {
+    static std::atomic<long long> next_ok{0};
+    static std::atomic<unsigned long> dropped{0};
+    const long long now = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+    long long expected = next_ok.load(std::memory_order_relaxed);
+    if (now < expected ||
+        !next_ok.compare_exchange_strong(expected, now + 1,
+                                         std::memory_order_relaxed)) {
+        dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    LOG_WARN("http: route '%s' refused: %s (%lu more suppressed)", route.c_str(),
+             why, dropped.exchange(0, std::memory_order_relaxed));
+}
 
 bool iequals(const char* a, size_t alen, const char* b) {
     size_t blen = std::strlen(b);
@@ -174,8 +205,13 @@ void HttpConnection::handle_client_bytes(const char* data, size_t n) {
             forward_body(data, n);
             break;
         case State::Streaming:
-        case State::Closing:
             // No pipelining: extra client bytes after the request are ignored.
+            break;
+        case State::Closing:
+            if (linger_) {
+                lingered_ += n;  // the unread body of a rejected request
+                if (lingered_ > kLingerMaxBytes) close_both();
+            }
             break;
     }
 }
@@ -205,6 +241,9 @@ IoStatus HttpConnection::pump_write() {
         backend_->resume_reads();
     }
     if (state_ == State::Closing) {
+        // Lingering: hold the socket open until the client stops sending (EOF),
+        // or check_timeout() / the byte cap gives up on it.
+        if (linger_ && !client_eof_) return IoStatus::Ok;
         close_both();
         return IoStatus::Ok;
     }
@@ -265,8 +304,10 @@ void HttpConnection::process_head() {
                                  &path, &path_len, &minor_version, headers,
                                  &num_headers, 0);
     if (pret == -2) {  // incomplete
-        if (in_.size() > kMaxHead)
+        if (in_.size() > kMaxHead) {
+            linger_ = true;  // the rest of the head is still coming
             send_error(431, "Request Header Fields Too Large", "header too large");
+        }
         return;  // wait for more bytes
     }
     if (pret == -1) {
@@ -291,6 +332,8 @@ void HttpConnection::process_head() {
     long content_length = 0;
     bool saw_content_length = false;
     bool chunked = false;
+    const char* authz = nullptr;  // Authorization value, held back from `head`
+    size_t authz_len = 0;
 
     std::string head;
     head.reserve(head_len_ + 32);
@@ -319,6 +362,17 @@ void HttpConnection::process_head() {
             }
         }
         if (iequals(h.name, h.name_len, "transfer-encoding")) chunked = true;
+        if (iequals(h.name, h.name_len, "authorization")) {
+            // Two credentials leave "which one counts" up to whoever reads
+            // them; castle and the backend must never disagree on that.
+            if (authz) {
+                send_error(400, "Bad Request", "duplicate authorization");
+                return;
+            }
+            authz = h.value;
+            authz_len = h.value_len;
+            continue;  // appended below, only if the route doesn't consume it
+        }
 
         if (is_hop_by_hop(h.name, h.name_len)) continue;
         head.append(h.name, h.name_len);
@@ -326,7 +380,6 @@ void HttpConnection::process_head() {
         head.append(h.value, h.value_len);
         head += "\r\n";
     }
-    head += "Connection: close\r\n\r\n";
 
     // Checking Transfer-Encoding before ever using content_length is
     // load-bearing for smuggling defense: a TE+CL request must die here, never
@@ -336,19 +389,55 @@ void HttpConnection::process_head() {
         send_error(501, "Not Implemented", "chunked request body unsupported");
         return;
     }
-    if (max_body_ != 0 && static_cast<size_t>(content_length) > max_body_) {
-        send_error(413, "Payload Too Large", "request body too large");
+
+    // From here on the head is valid, so a refusal knows how much body is still
+    // in flight and can linger long enough for the client to read the answer.
+    const bool body_unread =
+        static_cast<size_t>(content_length) > in_.size() - head_len_;
+    auto refuse = [&](int code, const char* status, const char* body,
+                      const char* extra = nullptr) {
+        linger_ = body_unread;
+        send_response(code, status, body, false, extra);
+    };
+
+    const std::string target(path, path_len);
+    const Route* route = router_.match(host, target);
+    if (!route || !route->allows(target)) {
+        refuse(404, "Not Found", "no matching route");
         return;
     }
 
-    auto backend = router_.match(host, std::string(path, path_len));
-    if (!backend) {
-        send_error(404, "Not Found", "no matching route");
+    if (route->auth) {
+        const Access access = route->auth->check(authz, authz_len);
+        if (access == Access::None) {
+            warn_auth(route->name, authz ? "bad credential" : "no credential");
+            refuse(401, "Unauthorized", "credential required", kAuthChallenge);
+            return;
+        }
+        // Exact match: methods are case-sensitive, so "get" is not GET.
+        const std::string m(method, method_len);
+        const bool read_only_method = m == "GET" || m == "HEAD";
+        if (access == Access::ReadOnly && !read_only_method) {
+            warn_auth(route->name, "read-only credential, write method");
+            refuse(403, "Forbidden", "read-only credential");
+            return;
+        }
+        // Consumed here: the credential never travels further downstream.
+    } else if (authz) {
+        head += "Authorization: ";
+        head.append(authz, authz_len);
+        head += "\r\n";
+    }
+    head += "Connection: close\r\n\r\n";
+
+    const size_t max_body = route->max_body.value_or(max_body_);
+    if (max_body != 0 && static_cast<size_t>(content_length) > max_body) {
+        refuse(413, "Payload Too Large", "request body too large");
         return;
     }
 
     upstream_ = std::move(head);
-    backend_target_ = *backend;
+    backend_target_ = route->backend;
     body_remaining_ = static_cast<size_t>(content_length);
 
     start_backend();  // sends the head; leaves state_ == ReadingHead on success
@@ -537,17 +626,21 @@ void HttpConnection::send_error(int code, const char* status, const char* body) 
 }
 
 void HttpConnection::send_response(int code, const char* status,
-                                   const std::string& body, bool head_only) {
+                                   const std::string& body, bool head_only,
+                                   const char* extra_headers) {
     char head[192];
     std::snprintf(head, sizeof(head),
                   "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\n"
                   "Content-Length: %zu\r\nCache-Control: no-store\r\n"
-                  "Connection: close\r\n\r\n",
+                  "Connection: close\r\n",
                   code, status, body.size());
     out_ = head;
+    if (extra_headers) out_ += extra_headers;
+    out_ += "\r\n";
     if (!head_only) out_ += body;
     responded_ = true;
     state_ = State::Closing;
+    if (linger_) linger_deadline_ = std::chrono::steady_clock::now() + kLingerTime;
     write_block_ = pump_write();
     if (closed_) return;
     recompute_interest();
@@ -555,6 +648,11 @@ void HttpConnection::send_response(int code, const char* status,
 
 // ---------------------------------------------------------------------------
 void HttpConnection::check_timeout(std::chrono::steady_clock::time_point now) {
+    if (linger_ && state_ == State::Closing && out_.empty() &&
+        now > linger_deadline_) {
+        close_both();  // the client never stopped sending; give up on it
+        return;
+    }
     if (timeout_.count() <= 0) return;
     if (now - last_activity_ > timeout_) {
         LOG_WARN("http: closing idle client (fd %d, idle > %llds)", fd(),

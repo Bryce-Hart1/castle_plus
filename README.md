@@ -77,12 +77,40 @@ but also use modern C++ in a way that is actually everyday useful.
   paused when a peer's send buffer crosses 256 KiB, resuming below 64 KiB. An
   upload or download of any size runs in bounded memory, which is what lets
   castle+ front a file or photo vault.
-- Synthesizes `404`, `413`, `431`, `502`, `501` itself when it must.
+- Synthesizes `400`, `401`, `403`, `404`, `413`, `431`, `502`, `501` itself
+  when it must. An error sent before the request body was read lingers
+  (reads and discards up to 1 MiB, for up to 2 s) before closing, so the client
+  isn't sent a reset before it has read the answer.
 - **Request-smuggling defenses**: `Transfer-Encoding` + `Content-Length` is
   rejected before framing, duplicate `Content-Length` headers are rejected even
   when identical, and `Content-Length` is parsed strictly (no `strtol`
   permissiveness, no silent overflow).
 - Hop-by-hop headers stripped before forwarding.
+- **Per-route policy**, applied to the request head before any backend is
+  contacted: a path allowlist (`allow`), a body cap (`max_body`), and token
+  auth (`auth`). See below.
+
+### Route authentication
+
+A route with `auth = <file>` refuses anything without a valid token: `401`
+with a Basic challenge, or `403` when a read-only token tries to write. Tokens
+arrive as `Authorization: Bearer <token>`, or as the password of Basic auth so
+a browser can prompt once and then play a video straight from its URL. The
+header is consumed at castle and never forwarded.
+
+The file stores SHA-256 hashes, never tokens, one per line as `rw <hex>` or
+`ro <hex>` (`ro` = `GET`/`HEAD` only). castle refuses a file that group/other
+can write. Every entry is compared in constant time. `SIGHUP` reloads it
+alongside the TLS cert, so revoking a token needs no restart; a broken edit is
+rejected and the current tokens keep working. Two `Authorization` headers on
+one request are a `400`. Refusals are logged at WARN, at most one line a
+second, and the credential itself is never logged.
+
+```sh
+t=$(openssl rand -hex 32); echo "$t"           # give this to the client
+printf 'rw %s\n' "$(printf %s "$t" | sha256sum | cut -d' ' -f1)" >> vault.tokens
+chmod 600 vault.tokens && rc-service castle reload
+```
 
 ### TLS termination
 
@@ -257,6 +285,10 @@ path    = /
 backend = 127.0.0.1:9001
 ```
 
+A route can also carry `max_body = 64M`, `allow = /v1/blobs/ /healthz` and
+`auth = /path/to/tokens` — see [Route authentication](#route-authentication)
+and the comments in `config/routes.conf`.
+
 **`services.conf`** — what  launches and supervises:
 
 ```ini
@@ -282,6 +314,30 @@ curl -k https://localhost:8443/
 
 In production the cert comes from Let's Encrypt; `systemctl reload castle` (or
 `rc-service castle reload`) sends `SIGHUP` and swaps it in live.
+
+### Fronting swiftSearch (a vault)
+
+[swiftSearch](https://github.com/Bryce-Hart1/swiftSearch) is a key → bytes store with no
+auth or TLS of its own, so castle is its security boundary. The commented
+`[vault]` sections in `config/routes.conf` and `config/services.conf` are the
+whole setup: auth on every request, `/v1/admin/` unreachable via the
+allowlist, a 64 MiB cap matching swiftSearch's own, and the backend bound to
+`127.0.0.1`. Responses are relayed byte for byte, so `100 Continue`, `206`,
+`304`, `ETag` and `Content-Range` (video seeking) pass through untouched.
+
+Behind a Cloudflare Tunnel, also:
+
+- set `originRequest: disableChunkedEncoding: true` on the vault's ingress
+  rule, or uploads can arrive chunked and get `501`;
+- add a Cache Rule that **bypasses cache** for the vault hostname — swiftSearch
+  sends `Cache-Control: no-cache`, which a shared cache may store, and
+  Cloudflare caches `.jpg`/`.mp4` by extension.
+
+`scripts/vault_acceptance.sh` checks all of it end to end through castle:
+
+```sh
+H=https://vault.example.com RW=<rw token> RO=<ro token> scripts/vault_acceptance.sh
+```
 
 ### Run it as a service
 
@@ -334,11 +390,13 @@ src/
   http/             router, client connection, upstream connection
   supervisor/       fork/exec, signalfd reaping, backoff, health, breaker
   control/          admin thread on a Unix socket
+  gateway/          per-IP rate limiter, route token auth
   config/           services manifest parser
   util/             logging, hardware vitals, autocorrect
 third_party/
   picohttpparser/   vendored HTTP request parser (MIT)
 config/             example routes + services manifests
+scripts/            vault_acceptance.sh (end-to-end checks through castle)
 openrc/             OpenRC service script
 ```
 
