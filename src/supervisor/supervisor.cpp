@@ -495,6 +495,47 @@ std::string Supervisor::describe_backend_status() {
     return "supervisor not responding\n";
 }
 
+std::vector<Supervisor::ServiceSnapshot> Supervisor::take_snapshot() const {
+    const auto now = steady_clock::now();
+    std::vector<ServiceSnapshot> out;
+    out.reserve(services_.size());
+    for (const auto& s : services_) {
+        ServiceSnapshot snap;
+        snap.cfg = s.cfg;
+        snap.pid = s.pid;
+        snap.state = s.state;
+        if (s.pid > 0 && s.state == ServiceState::Running) {
+            snap.uptime_sec =
+                std::chrono::duration_cast<seconds>(now - s.last_start).count();
+        }
+        snap.restart_count = s.restart_count;
+        snap.failure_count = s.failure_count;
+        // Count without pruning, so this stays a const view (same as
+        // render_backend_status).
+        for (const auto& t : s.recent_failures) {
+            if (now - t <= kFailureWindow) ++snap.failures_24h;
+        }
+        snap.ever_failed = s.ever_failed;
+        if (s.ever_failed) {
+            snap.last_failure_reason = s.last_failure_reason;
+            snap.last_failure_ago_sec =
+                std::chrono::duration_cast<seconds>(now - s.last_failure_mono)
+                    .count();
+        }
+        out.push_back(std::move(snap));
+    }
+    return out;
+}
+
+std::optional<std::vector<Supervisor::ServiceSnapshot>> Supervisor::snapshot() {
+    auto prom = std::make_shared<std::promise<std::vector<ServiceSnapshot>>>();
+    auto fut = prom->get_future();
+    loop_.post([this, prom] { prom->set_value(take_snapshot()); });
+    if (fut.wait_for(std::chrono::seconds(1)) == std::future_status::ready)
+        return fut.get();
+    return std::nullopt;
+}
+
 Service* Supervisor::find_by_pid(pid_t pid) {
     for (auto& s : services_)
         if (s.pid == pid) return &s;

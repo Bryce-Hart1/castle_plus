@@ -24,6 +24,7 @@ add_executable(castle
   src/net/connectivity.cpp
   src/net/echo_connection.cpp
   src/control/control_server.cpp
+  src/control/swiftsearch_status.cpp
   src/config/service_config.cpp
   src/supervisor/supervisor.cpp
   src/http/router.cpp

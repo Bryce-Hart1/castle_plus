@@ -3,6 +3,7 @@
 // throughput. poll() always watches stop_fd_ alongside the real fd so shutdown
 // interrupts even a parked admin session.
 #include "control/control_server.hpp"
+#include "control/swiftsearch_status.hpp"
 #include "util/autocorrect.hpp"
 
 #include <poll.h>
@@ -335,6 +336,7 @@ std::string ControlServer::dispatch_command(const std::string& raw, bool& close_
             "  shutdown        gracefully stop castle+\n"
             "  systemstatus    system vitals, internet, critical logs\n"
             "  backendstatus   per-backend uptime, failure history, quarantine\n"
+            "  swiftsearch [name]  vault process, healthz, store, disk, keys, warnings\n"
             "  exit            close this admin session\n";
     }
     if (cmd == "ping") return "pong\n";
@@ -362,6 +364,9 @@ std::string ControlServer::dispatch_command(const std::string& raw, bool& close_
     if(cmd == "backendstatus"){
         return backendStatusHelper(supervisor_);
     }
+    if (cmd == "swiftsearch" || cmd == "vault") {
+        return swiftsearchStatus(supervisor_, arg);
+    }
     if (cmd == "exit" || cmd == "quit") {
         close_session = true;
         return "bye\n";
@@ -382,7 +387,7 @@ std::string ControlServer::dispatch_command(const std::string& raw, bool& close_
     static const bstd::autoCorrectFilter filter(3, {
         "help", "ping", "status", "stats", "health", "errors",
         "services", "backends", "restart", "shutdown", "exit", "quit",
-        "systemstatus", "backendstatus", "clear"});
+        "systemstatus", "backendstatus", "clear", "swiftsearch", "vault"});
     // The command string is raw user input; an exception escaping this thread
     // would terminate the whole process, so a failed suggestion must never be
     // worse than no suggestion.

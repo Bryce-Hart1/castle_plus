@@ -6,6 +6,7 @@ cleanly when their handler is destroyed — no manual close() bookkeeping.
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace castle {
@@ -71,5 +72,14 @@ Socket make_reuseport_listener(const std::string& bind_addr, uint16_t port, int 
 // DNS) accepts a connection within timeout_ms. The connection is closed straight
 // away. Used by the supervisor's backend health checks and the internet watch.
 bool tcp_probe(const std::string& host, uint16_t port, int timeout_ms);
+
+// Blocking `GET <path>` to <host>:<port> (IPv4 literal) with Connection: close.
+// Reads only the status line and returns its code. The whole exchange is
+// bounded by timeout_ms. On failure returns nullopt and sets `err` to
+// "refused", "timeout", "bad response" or a short reason. Used by the
+// `swiftsearch` control command to hit /healthz.
+std::optional<int> http_get_status(const std::string& host, uint16_t port,
+                                   const std::string& path, int timeout_ms,
+                                   std::string& err);
 
 }  // namespace castle

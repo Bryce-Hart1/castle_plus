@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,6 +45,25 @@ public:
     std::string describe_backend_status();
     bool restart_service(const std::string& name);
 
+    // A copy of one service's config and live state, for control commands that
+    // render their own view of it (`swiftsearch`). Durations are worked out on
+    // the supervisor thread, so the copy is self-contained.
+    struct ServiceSnapshot {
+        ServiceConfig cfg;
+        pid_t pid = -1;
+        ServiceState state = ServiceState::Stopped;
+        long long uptime_sec = -1;   // -1 unless running
+        int restart_count = 0;
+        int failure_count = 0;       // since castle started
+        std::size_t failures_24h = 0;
+        bool ever_failed = false;
+        std::string last_failure_reason;
+        long long last_failure_ago_sec = -1;  // -1 if never failed
+    };
+    // Every service, in manifest order. nullopt if the supervisor thread didn't
+    // answer within a second. Thread-safe (posted to the supervisor loop).
+    std::optional<std::vector<ServiceSnapshot>> snapshot();
+
     // Per-service start instant for /_castle/uptime. Safe from any thread and
     // never waits on the supervisor loop — just a brief lock and a copy.
     struct ServiceUptime {
@@ -64,6 +84,7 @@ private:
     bool do_restart(const std::string& name);
     std::string render_services() const;
     std::string render_backend_status() const;
+    std::vector<ServiceSnapshot> take_snapshot() const;
     Service* find_by_pid(pid_t pid);
     Service* find_by_name(const std::string& name);
     // Mirror s's running/start into the uptime snapshot (call after pid changes).

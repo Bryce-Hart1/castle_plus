@@ -18,6 +18,11 @@ struct ServiceConfig {
     std::vector<std::string> args;    // argv after exec
     std::string workdir;              // optional chdir before exec
 
+    // What the backend is, for control commands that know how to look inside
+    // one. Empty = a plain process. Only "swiftsearch" exists so far (the
+    // `swiftsearch` control command finds its services by this tag).
+    std::string kind;
+
     bool autorestart = true;          // relaunch on exit?
 
     // Optional TCP health check (health_tcp = host:port). port == 0 disables.
@@ -38,6 +43,7 @@ struct ServiceConfig {
 //   exec = /usr/bin/foo
 //   args = --flag value "quoted arg"
 //   workdir = /srv/foo
+//   kind = swiftsearch
 //   autorestart = true
 //   health_tcp = 127.0.0.1:9001
 //   health_interval = 5

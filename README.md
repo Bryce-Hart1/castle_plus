@@ -162,6 +162,7 @@ its own thread, off the data path.
 | `services` | supervised backends: state / pid / health / restarts |
 | `backendstatus` | per-backend uptime, failure history, quarantine details |
 | `systemstatus` | host vitals: threads, load, CPU temp, memory, internet, critical log entries |
+| `swiftsearch [name]` | the vault: process, `/healthz`, memory/CPU, store size, disk, access keys, recent warnings (alias `vault`) |
 | `restart <name>` | restart a backend (and clear its quarantine) |
 | `errors` | log lines since the last pull |
 | `shutdown` | graceful stop |
@@ -182,6 +183,34 @@ PERMANENTLY DOWN — not being restarted:
       last failure: exit 3
       recover with: restart flaky
 ```
+
+`swiftsearch` looks inside a supervised [swiftSearch](#fronting-swiftsearch-a-vault)
+tagged `kind = swiftsearch` in `services.conf`. Everything is read from the
+outside, so it needs neither swiftSearch's `--admin` route nor one of its keys:
+`/proc/<pid>`, `GET /healthz`, the store folder, and the `swiftSearchLogs` file in
+the service's `workdir`. The store, port and limits come from the service's `args`.
+
+```text
+$ printf 'swiftsearch\n' | nc -U /run/castle/castle.sock
+swiftSearch 'vault'
+  process:   running, pid 4121, up 2d 03h, 0 restarts, 0 failures (24h)
+  http:      ok, /healthz 200 in 1.2 ms on 127.0.0.1:9101
+  memory:    rss 182.4 MB, 7 threads, 23 open fds
+  cpu:       0.4% of one core
+store /var/lib/swiftsearch
+  created:   2026-10-31 14:57:28
+  segments:  3 files, 1.4 GB
+  disk:      48.1 GB free of 233.0 GB (79% used)
+  access:    3 keys (1 admin, 1 write, 1 read)
+config
+  threads:   -j 2   mem-cap: 256M   bind: 127.0.0.1:9101
+recent warnings and errors (/var/lib/swiftsearch-logs/swiftSearchLogs, UTC)
+  none
+```
+
+It warns if swiftSearch was started with `--admin` or on a non-loopback
+`--bind`. The number of stored values, cache use and dead bytes are not shown:
+only swiftSearch's admin route has them.
 
 ### HTTP status endpoints
 

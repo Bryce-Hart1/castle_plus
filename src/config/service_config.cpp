@@ -116,6 +116,12 @@ bool parse_services_file(const std::string& path, std::vector<ServiceConfig>& ou
             cur->args = split_args(val);
         } else if (key == "workdir") {
             cur->workdir = val;
+        } else if (key == "kind") {
+            // Refuse an unknown kind rather than ignore it: a typo would
+            // otherwise just hide the service from its status command.
+            if (val != "swiftsearch")
+                return fail("unknown kind '" + val + "' (known: swiftsearch)");
+            cur->kind = val;
         } else if (key == "autorestart") {
             if (!parse_bool(val, cur->autorestart))
                 return fail("autorestart must be true/false");
