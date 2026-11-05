@@ -6,6 +6,7 @@
  \___\__,_|___/\__|_|\___| |_|
 ```
 An open source project by Bryce Hart
+Now with [swiftSearch](https://github.com/Bryce-Hart1/swiftSearch) integration (check swiftSearch branch)
 ---
 
 A from-scratch reverse proxy and process supervisor in C++20, built on a raw
